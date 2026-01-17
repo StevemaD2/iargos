@@ -1,0 +1,8 @@
+{
+  "name": "iArgos",
+  "description": "Sistema de inteligência territorial e gestão de equipe hierárquica para campanhas políticas.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}

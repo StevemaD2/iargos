@@ -44,8 +44,10 @@ const App: React.FC = () => {
           <Routes>
             {!user ? (
               <>
-                <Route path="/login" element={<Login onLogin={handleLogin} />} />
-                <Route path="*" element={<Navigate to="/login" />} />
+                <Route path="/" element={<Login onLogin={handleLogin} initialMode="connect" lockMode />} />
+                <Route path="/diretor" element={<Login onLogin={handleLogin} initialMode="director" lockMode />} />
+                <Route path="/login" element={<Navigate to="/" />} />
+                <Route path="*" element={<Navigate to="/" />} />
               </>
             ) : (
               <>

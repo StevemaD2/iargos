@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { User, UserRole } from '../types';
 import { supabase } from '../services/supabaseClient';
 import { requestCurrentLocation } from '../services/locationService';
@@ -7,11 +7,19 @@ import { recordMemberTimesheetEvent } from '../services/memberActivityService';
 
 interface LoginProps {
   onLogin: (user: User) => void;
+  initialMode?: 'choice' | 'director' | 'connect';
+  lockMode?: boolean;
 }
 
-const Login: React.FC<LoginProps> = ({ onLogin }) => {
+const Login: React.FC<LoginProps> = ({ onLogin, initialMode = 'choice', lockMode = false }) => {
   type LoginMode = 'choice' | 'director' | 'connect';
-  const [mode, setMode] = useState<LoginMode>('choice');
+  const resolveInitialMode = (value: typeof initialMode): LoginMode => {
+    if (value === 'director') return 'director';
+    if (value === 'connect') return 'connect';
+    return 'choice';
+  };
+
+  const [mode, setMode] = useState<LoginMode>(() => resolveInitialMode(initialMode));
   const [directorUser, setDirectorUser] = useState('');
   const [directorPassword, setDirectorPassword] = useState('');
   const [directorLoading, setDirectorLoading] = useState(false);
@@ -25,7 +33,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [connectPix, setConnectPix] = useState('');
   const [returnCpf, setReturnCpf] = useState('');
 
+  useEffect(() => {
+    setMode(resolveInitialMode(initialMode));
+  }, [initialMode]);
+
   const switchMode = (nextMode: LoginMode) => {
+    if (lockMode) return;
     setStatus(null);
     setConnectVariant('first');
     setConnectToken('');
@@ -451,14 +464,14 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
               <i className="fas fa-fingerprint text-indigo-400"></i>
               Autenticação
             </h2>
-            {mode !== 'choice' && (
+            {mode !== 'choice' && !lockMode && (
               <button onClick={() => switchMode('choice')} className="text-xs text-slate-400 hover:text-white transition-colors">
                 Alterar opção
               </button>
             )}
           </div>
 
-          {mode === 'choice' && (
+          {mode === 'choice' && !lockMode && (
             <div className="space-y-3">
               <button
                 onClick={() => switchMode('director')}

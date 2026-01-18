@@ -21,7 +21,7 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout }) => {
     { path: '/financeiro', label: 'Controle e Financeiro', icon: 'fa-coins', roles: [UserRole.DIRECTOR] },
     { path: '/eleitores', label: 'Eleitores', icon: 'fa-person-booth', roles: [UserRole.SOLDIER, UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] },
     { path: '/configuracoes', label: 'Configurações', icon: 'fa-sliders', roles: [UserRole.DIRECTOR] },
-    { path: '/report', label: 'Novo Registro', icon: 'fa-plus-circle', roles: [UserRole.SOLDIER, UserRole.L3] }
+    { path: '/report', label: 'Registros', icon: 'fa-file-waveform', roles: [UserRole.SOLDIER, UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] }
   ];
 
   const filteredItems = navItems.filter(item => item.roles.includes(user.role));

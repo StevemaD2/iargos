@@ -74,6 +74,18 @@ export interface Submission {
     sentiment: VoterSentiment;
     risk: boolean;
   };
+  attachments?: SubmissionAttachment[];
+}
+
+export type SubmissionAttachmentType = 'image' | 'audio' | 'video' | 'file';
+
+export interface SubmissionAttachment {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  mimeType: string;
+  kind: SubmissionAttachmentType;
 }
 
 export type CampaignScheduleStatus = 'PLANEJADO' | 'EM_ANDAMENTO' | 'CONCLUIDO' | 'ATRASADO';

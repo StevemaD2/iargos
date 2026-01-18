@@ -76,16 +76,57 @@ export interface Submission {
   };
 }
 
+export type CampaignScheduleStatus = 'PLANEJADO' | 'EM_ANDAMENTO' | 'CONCLUIDO' | 'ATRASADO';
+
+export interface CampaignScheduleItem {
+  id?: string;
+  date: string;
+  title: string;
+  status?: CampaignScheduleStatus;
+  responsibleId?: string | null;
+}
+
 export interface CampaignConfig {
   state: string;
   electionDate: string;
-  schedule: { date: string; title: string }[];
+  schedule: CampaignScheduleItem[];
+  version?: number;
+}
+
+export interface MemberProfile {
+  id: string;
+  name: string;
+  role: UserRole;
+  leaderId?: string | null;
+  phone?: string | null;
+  cpf?: string | null;
+  pix?: string | null;
+  createdAt?: string | null;
+  dailyRate?: number | null;
+  timesheet?: any;
+}
+
+export interface LeaderZoneSummary {
+  leaderId: string;
+  leaderName: string;
+  leaderRole: UserRole;
+  zones: { id: string; name: string }[];
+}
+
+export interface ZoneDirectoryEntry {
+  id: string;
+  name: string;
+  leaderIds: string[];
+  subzones: { id: string; name: string; leaderIds: string[] }[];
 }
 
 export interface HierarchyNote {
+  id?: string;
   role: UserRole;
   text: string;
   updatedAt: string;
+  version?: number;
+  recipients?: string[] | null;
 }
 
 export interface User {

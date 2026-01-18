@@ -2,6 +2,8 @@
 import React, { useState } from 'react';
 import { User, UserRole } from '../types';
 import { supabase } from '../services/supabaseClient';
+import { requestCurrentLocation } from '../services/locationService';
+import { recordMemberTimesheetEvent } from '../services/memberActivityService';
 
 interface LoginProps {
   onLogin: (user: User) => void;
@@ -14,15 +16,35 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [directorPassword, setDirectorPassword] = useState('');
   const [directorLoading, setDirectorLoading] = useState(false);
   const [connectLoading, setConnectLoading] = useState(false);
+  const [connectVariant, setConnectVariant] = useState<'first' | 'existing'>('first');
   const [status, setStatus] = useState<{ type: 'error' | 'info' | 'success'; message: string } | null>(null);
   const [connectToken, setConnectToken] = useState('');
   const [connectName, setConnectName] = useState('');
   const [connectPhone, setConnectPhone] = useState('');
+  const [connectCpf, setConnectCpf] = useState('');
+  const [connectPix, setConnectPix] = useState('');
+  const [returnCpf, setReturnCpf] = useState('');
 
   const switchMode = (nextMode: LoginMode) => {
     setStatus(null);
+    setConnectVariant('first');
+    setConnectToken('');
+    setConnectName('');
+    setConnectPhone('');
+    setConnectCpf('');
+    setConnectPix('');
+    setReturnCpf('');
     setMode(nextMode);
   };
+
+  const handleConnectVariantChange = (variant: 'first' | 'existing') => {
+    setConnectVariant(variant);
+    setStatus(null);
+  };
+
+  const sanitizeCpf = (value: string) => value.replace(/\D/g, '');
+
+  const captureGeoSnapshot = () => requestCurrentLocation().catch(() => null);
 
   const handleDirectorLogin = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -155,7 +177,8 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       setStatus({ type: 'error', message: 'Configure o Supabase URL/KEY no .env.local para continuar.' });
       return;
     }
-    if (!connectToken.trim() || !connectName.trim() || !connectPhone.trim()) {
+    const sanitizedCpf = sanitizeCpf(connectCpf);
+    if (!connectToken.trim() || !connectName.trim() || !connectPhone.trim() || !sanitizedCpf || !connectPix.trim()) {
       setStatus({ type: 'error', message: 'Preencha todas as informações para conectar.' });
       return;
     }
@@ -165,6 +188,8 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       return;
     }
 
+    const locationPromise = captureGeoSnapshot();
+    const locationPromise = captureGeoSnapshot();
     setConnectLoading(true);
     setStatus(null);
     try {
@@ -218,13 +243,17 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
         return;
       }
 
+      const inviteTokenSignature = `${token}::${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)}`;
+
       const payload: Record<string, any> = {
         operacao_id: invite.operacao_id,
         diretor_id: directorId,
         tipo: invite.tipo,
         nome: connectName.trim(),
         telefone: connectPhone.trim(),
-        convite_token: token
+        convite_token: inviteTokenSignature,
+        cpf: sanitizedCpf,
+        pix: connectPix.trim()
       };
 
       const responsavelId = metadata?.responsavel_id || invite.emitido_por;
@@ -232,7 +261,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
       const memberResponse = await supabase
         .from('membros')
-        .upsert(payload, { onConflict: 'operacao_id, telefone' })
+        .upsert(payload, { onConflict: 'operacao_id, cpf' })
         .select('id, nome, tipo, operacao_id, responsavel_id')
         .single();
 
@@ -266,6 +295,20 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
         }
       }
 
+      const loginLocation = await locationPromise;
+      try {
+        await recordMemberTimesheetEvent(member.id, 'LOGIN', loginLocation);
+      } catch (timesheetError) {
+        console.warn('Falha ao registrar ponto de entrada', timesheetError);
+      }
+
+      const loginLocation = await locationPromise;
+      try {
+        await recordMemberTimesheetEvent(member.id, 'LOGIN', loginLocation);
+      } catch (timesheetError) {
+        console.warn('Falha ao registrar ponto de entrada', timesheetError);
+      }
+
       onLogin({
         id: member.id,
         name: member.nome,
@@ -283,11 +326,81 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       if (error?.code === '23505') {
         setStatus({
           type: 'error',
-          message: 'Telefone já registrado nesta operação. Utilize o mesmo contato ou solicite suporte.'
+          message: 'CPF já registrado nesta operação. Utilize a opção "Já sou registrado".'
         });
       } else {
         setStatus({ type: 'error', message: 'Não foi possível validar o convite agora.' });
       }
+    } finally {
+      setConnectLoading(false);
+    }
+  };
+
+  const handleRegisteredLogin = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!supabase) {
+      setStatus({ type: 'error', message: 'Configure o Supabase URL/KEY no .env.local para continuar.' });
+      return;
+    }
+    const sanitizedCpf = sanitizeCpf(returnCpf);
+    if (!sanitizedCpf) {
+      setStatus({ type: 'error', message: 'Informe seu CPF para continuar.' });
+      return;
+    }
+
+    setConnectLoading(true);
+    setStatus(null);
+    try {
+      const memberResponse = await supabase
+        .from('membros')
+        .select('id, nome, tipo, operacao_id, responsavel_id')
+        .eq('cpf', sanitizedCpf)
+        .maybeSingle();
+
+      if (memberResponse.error) throw memberResponse.error;
+      const member = memberResponse.data;
+      if (!member) {
+        setStatus({ type: 'error', message: 'CPF não encontrado. Verifique os dígitos ou faça seu primeiro acesso.' });
+        return;
+      }
+
+      let operationDetails: { id?: string; nome?: string; estado?: string; diretor_id?: string } | null = null;
+      if ((member as any).operacoes) {
+        operationDetails = (member as any).operacoes;
+      } else if (member.operacao_id) {
+        try {
+          const opResp = await supabase
+            .from('operacoes')
+            .select('id, nome, estado, diretor_id')
+            .eq('id', member.operacao_id)
+            .maybeSingle();
+          if (!opResp.error) {
+            operationDetails = opResp.data;
+          }
+        } catch (opError) {
+          console.warn('Falha ao ler operação vinculada ao membro', opError);
+        }
+      }
+
+      const normalizedRole = (member.tipo || '').toUpperCase();
+      let resolvedRole = UserRole.SOLDIER;
+      if (normalizedRole.includes('LIDER_N1') || normalizedRole === 'L1') resolvedRole = UserRole.L1;
+      else if (normalizedRole.includes('LIDER_N2') || normalizedRole === 'L2') resolvedRole = UserRole.L2;
+      else if (normalizedRole.includes('LIDER_N3') || normalizedRole === 'L3' || normalizedRole === 'LEADER')
+        resolvedRole = UserRole.L3;
+
+      onLogin({
+        id: member.id,
+        name: member.nome,
+        role: resolvedRole,
+        leaderId: member.responsavel_id || undefined,
+        operationId: member.operacao_id,
+        operationName: operationDetails?.nome,
+        operationState: operationDetails?.estado
+      });
+    } catch (error: any) {
+      console.error('Login por CPF falhou', error);
+      setStatus({ type: 'error', message: 'Não foi possível validar seu CPF agora.' });
     } finally {
       setConnectLoading(false);
     }
@@ -405,57 +518,134 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           )}
 
           {mode === 'connect' && (
-            <form className="space-y-4" onSubmit={handleConnect}>
-              <div>
-                <label className="text-xs uppercase font-bold text-slate-400">Link ou Código</label>
-                <input
-                  type="text"
-                  value={connectToken}
-                  onChange={(e) => setConnectToken(e.target.value)}
-                  className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                  placeholder="cole aqui o token recebido"
-                />
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleConnectVariantChange('first')}
+                  className={`py-3 rounded-2xl font-semibold flex items-center justify-center gap-2 border ${
+                    connectVariant === 'first'
+                      ? 'bg-white text-slate-900 border-white'
+                      : 'bg-white/5 text-white border-white/10'
+                  }`}
+                >
+                  <i className="fas fa-user-plus"></i> Primeiro Acesso
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleConnectVariantChange('existing')}
+                  className={`py-3 rounded-2xl font-semibold flex items-center justify-center gap-2 border ${
+                    connectVariant === 'existing'
+                      ? 'bg-white text-slate-900 border-white'
+                      : 'bg-white/5 text-white border-white/10'
+                  }`}
+                >
+                  <i className="fas fa-id-card"></i> Já Sou Registrado
+                </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs uppercase font-bold text-slate-400">Nome Completo</label>
-                  <input
-                    type="text"
-                    value={connectName}
-                    onChange={(e) => setConnectName(e.target.value)}
-                    className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                    placeholder="Seu nome"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs uppercase font-bold text-slate-400">Telefone</label>
-                  <input
-                    type="tel"
-                    value={connectPhone}
-                    onChange={(e) => setConnectPhone(e.target.value)}
-                    className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                    placeholder="(00) 00000-0000"
-                  />
-                </div>
-              </div>
+              {connectVariant === 'first' ? (
+                <form className="space-y-4" onSubmit={handleConnect}>
+                  <div>
+                    <label className="text-xs uppercase font-bold text-slate-400">Link ou Código</label>
+                    <input
+                      type="text"
+                      value={connectToken}
+                      onChange={(e) => setConnectToken(e.target.value)}
+                      className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="cole aqui o token recebido"
+                    />
+                  </div>
 
-              <div>
-                <p className="text-[11px] text-slate-400">
-                  O link identifica automaticamente se você é Líder ou Soldado. Apenas confirme seus dados.
-                </p>
-              </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs uppercase font-bold text-slate-400">Nome Completo</label>
+                      <input
+                        type="text"
+                        value={connectName}
+                        onChange={(e) => setConnectName(e.target.value)}
+                        className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        placeholder="Seu nome"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs uppercase font-bold text-slate-400">Telefone</label>
+                      <input
+                        type="tel"
+                        value={connectPhone}
+                        onChange={(e) => setConnectPhone(e.target.value)}
+                        className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        placeholder="(00) 00000-0000"
+                      />
+                    </div>
+                  </div>
 
-              <button
-                type="submit"
-                disabled={connectLoading}
-                className="w-full py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {connectLoading ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-link"></i>}
-                Conectar à Operação
-              </button>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs uppercase font-bold text-slate-400">CPF</label>
+                      <input
+                        type="text"
+                        value={connectCpf}
+                        onChange={(e) => setConnectCpf(e.target.value)}
+                        className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        placeholder="Apenas números"
+                      />
+                      <p className="text-[10px] text-slate-400 mt-1">Apenas números, sem pontos ou traços.</p>
+                    </div>
+                    <div>
+                      <label className="text-xs uppercase font-bold text-slate-400">Chave PIX</label>
+                      <input
+                        type="text"
+                        value={connectPix}
+                        onChange={(e) => setConnectPix(e.target.value)}
+                        className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        placeholder="CPF, telefone ou e-mail"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] text-slate-400">
+                      O link identifica automaticamente se você é Líder ou Soldado. Apenas confirme seus dados.
+                    </p>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={connectLoading}
+                    className="w-full py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {connectLoading ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-link"></i>}
+                    Registrar acesso
+                  </button>
+                </form>
+              ) : (
+                <form className="space-y-4" onSubmit={handleRegisteredLogin}>
+                  <div>
+                    <label className="text-xs uppercase font-bold text-slate-400">CPF</label>
+                    <input
+                      type="text"
+                      value={returnCpf}
+                      onChange={(e) => setReturnCpf(e.target.value)}
+                      className="w-full mt-2 px-4 py-3 rounded-2xl bg-white/5 border border-white/10 text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                      placeholder="Digite apenas números"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Este é o método oficial de acesso para membros já cadastrados.
+                    </p>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={connectLoading}
+                    className="w-full py-3 rounded-2xl bg-white/10 hover:bg-white/20 text-white font-bold flex items-center justify-center gap-2 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {connectLoading ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-unlock"></i>}
+                    Entrar com CPF
+                  </button>
+                </form>
+              )}
               {renderStatus()}
-            </form>
+            </div>
           )}
         </div>
       </div>

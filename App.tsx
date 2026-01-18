@@ -6,9 +6,10 @@ import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import SubmissionForm from './components/SubmissionForm';
 import QRScanner from './components/QRScanner';
-import QRGenerator from './components/QRGenerator';
 import LeaderFeed from './components/LeaderFeed';
 import Sidebar from './components/Sidebar';
+import { requestCurrentLocation } from './services/locationService';
+import { recordMemberTimesheetEvent } from './services/memberActivityService';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(() => {
@@ -21,7 +22,16 @@ const App: React.FC = () => {
     localStorage.setItem('iargos_user', JSON.stringify(newUser));
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    const currentUser = user;
+    if (currentUser && currentUser.role !== UserRole.DIRECTOR) {
+      try {
+        const location = await requestCurrentLocation().catch(() => null);
+        await recordMemberTimesheetEvent(currentUser.id, 'LOGOUT', location);
+      } catch (error) {
+        console.warn('Falha ao registrar saída do membro', error);
+      }
+    }
     setUser(null);
     localStorage.removeItem('iargos_user');
   };
@@ -39,10 +49,14 @@ const App: React.FC = () => {
               </>
             ) : (
               <>
-                <Route path="/" element={<Dashboard user={user} />} />
+                <Route path="/" element={<Dashboard user={user} view="COMMAND" />} />
+                <Route path="/estrutura" element={<Dashboard user={user} view="STRUCTURE" />} />
+                <Route path="/cronograma" element={<Dashboard user={user} view="CRONOGRAMA" />} />
+                <Route path="/configuracoes" element={<Dashboard user={user} view="SETTINGS" />} />
+                <Route path="/financeiro" element={<Dashboard user={user} view="FINANCE" />} />
+                <Route path="/team" element={<Dashboard user={user} view="TEAM" />} />
                 <Route path="/report" element={<SubmissionForm user={user} />} />
                 <Route path="/onboard" element={<QRScanner user={user} />} />
-                <Route path="/team" element={<QRGenerator user={user} />} />
                 <Route path="/feed" element={<LeaderFeed user={user} />} />
                 <Route path="*" element={<Navigate to="/" />} />
               </>

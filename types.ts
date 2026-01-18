@@ -84,6 +84,7 @@ export interface CampaignScheduleItem {
   title: string;
   status?: CampaignScheduleStatus;
   responsibleId?: string | null;
+  responsibleName?: string | null;
 }
 
 export interface CampaignConfig {
@@ -138,4 +139,21 @@ export interface User {
   operationId?: string;
   operationName?: string;
   operationState?: string;
+}
+
+export interface VoterRecord {
+  id: string;
+  operationId: string;
+  name: string;
+  phone: string;
+  city?: string | null;
+  neighborhood?: string | null;
+  sentiment?: VoterSentiment | null;
+  knowsCandidate?: boolean | null;
+  decidedVote?: boolean | null;
+  wishes?: string | null;
+  electoralZone?: string | null;
+  recordedById?: string | null;
+  recordedByName?: string | null;
+  createdAt: string;
 }

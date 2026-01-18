@@ -10,6 +10,7 @@ import LeaderFeed from './components/LeaderFeed';
 import Sidebar from './components/Sidebar';
 import { requestCurrentLocation } from './services/locationService';
 import { recordMemberTimesheetEvent } from './services/memberActivityService';
+import CandidateShare from './components/CandidateShare';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(() => {
@@ -36,12 +37,24 @@ const App: React.FC = () => {
     localStorage.removeItem('iargos_user');
   };
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    if (!root.style.getPropertyValue('--iargos-brand-primary')) {
+      root.style.setProperty('--iargos-brand-primary', '#4338ca');
+    }
+    if (!root.style.getPropertyValue('--iargos-brand-secondary')) {
+      root.style.setProperty('--iargos-brand-secondary', '#0f172a');
+    }
+  }, []);
+
   return (
     <Router>
-      <div className="flex min-h-screen bg-slate-50">
+      <div className="flex min-h-screen" style={{ backgroundColor: 'var(--iargos-brand-secondary)' }}>
         {user && <Sidebar user={user} onLogout={handleLogout} />}
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto bg-slate-50">
           <Routes>
+            <Route path="/santinho/:slug" element={<CandidateShare />} />
             {!user ? (
               <>
                 <Route path="/" element={<Login onLogin={handleLogin} initialMode="connect" lockMode />} />
@@ -57,6 +70,7 @@ const App: React.FC = () => {
                 <Route path="/configuracoes" element={<Dashboard user={user} view="SETTINGS" />} />
                 <Route path="/financeiro" element={<Dashboard user={user} view="FINANCE" />} />
                 <Route path="/team" element={<Dashboard user={user} view="TEAM" />} />
+                <Route path="/eleitores" element={<Dashboard user={user} view="VOTERS" />} />
                 <Route path="/report" element={<SubmissionForm user={user} />} />
                 <Route path="/onboard" element={<QRScanner user={user} />} />
                 <Route path="/feed" element={<LeaderFeed user={user} />} />

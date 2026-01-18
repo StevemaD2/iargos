@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
-import { User, SubmissionType, VoterSentiment, IntentionVoto } from '../types';
+import { User, SubmissionType, VoterSentiment, IntentionVoto, VoterInteraction } from '../types';
+import { createSubmission } from '../services/submissionsService';
 
 interface SubmissionFormProps {
   user: User;
@@ -8,17 +9,27 @@ interface SubmissionFormProps {
 
 const SubmissionForm: React.FC<SubmissionFormProps> = ({ user }) => {
   const [type, setType] = useState<SubmissionType>(SubmissionType.TEXTO_RELATO);
+  const [context, setContext] = useState<'RUA' | 'DIGITAL' | 'MISTO'>('RUA');
   const [location, setLocation] = useState<GeolocationPosition | null>(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [bairro, setBairro] = useState('');
+  const [cidade, setCidade] = useState('');
+  const [uf, setUf] = useState(user.operationState || '');
+  const [content, setContent] = useState('');
   
   // Interaction fields
-  const [interaction, setInteraction] = useState({
+  const [interaction, setInteraction] = useState<VoterInteraction>({
     foi_atendido: 'BEM',
     intencao_voto: IntentionVoto.EM_DUVIDA,
     sentimento: VoterSentiment.NEUTRO,
     principais_frases: '',
-    observacoes: ''
+    objecoes: [],
+    oportunidades: [],
+    observacoes: '',
+    temas_mencionados: [],
+    urgencia_followup: 'MEDIA'
   });
 
   useEffect(() => {
@@ -29,19 +40,52 @@ const SubmissionForm: React.FC<SubmissionFormProps> = ({ user }) => {
     );
   }, []);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
+    if (!user.operationId) {
+      setFormError('Você precisa estar vinculado a uma operação para enviar relatos.');
+      return;
+    }
     if (!location) {
-      alert("Aguardando precisão de GPS...");
+      setFormError('Aguardando precisão de GPS...');
+      return;
+    }
+    if (!content.trim()) {
+      setFormError('Descreva o relato antes de enviar.');
       return;
     }
     setLoading(true);
-    // Simulate API call
-    setTimeout(() => {
-      setLoading(false);
+    try {
+      await createSubmission({
+        operationId: user.operationId,
+        memberId: user.id,
+        memberName: user.name,
+        type,
+        context,
+        content: content.trim(),
+        interaction,
+        location: {
+          lat: location.coords.latitude,
+          lng: location.coords.longitude,
+          accuracy: location.coords.accuracy
+        },
+        locationDetails: {
+          bairro: bairro.trim() || undefined,
+          cidade: cidade.trim() || undefined,
+          uf: uf.trim() || undefined
+        }
+      });
       setSuccess(true);
+      setContent('');
+      setInteraction((prev) => ({ ...prev, principais_frases: '', observacoes: '' }));
       setTimeout(() => setSuccess(false), 3000);
-    }, 1500);
+    } catch (error) {
+      console.error('Submission error', error);
+      setFormError('Não foi possível enviar agora. Tente novamente.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -71,7 +115,11 @@ const SubmissionForm: React.FC<SubmissionFormProps> = ({ user }) => {
             </div>
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-2">Contexto</label>
-              <select className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500">
+              <select
+                value={context}
+                onChange={(e) => setContext(e.target.value as 'RUA' | 'DIGITAL' | 'MISTO')}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              >
                 <option value="RUA">Presencial (Rua)</option>
                 <option value="DIGITAL">Digital (Redes Sociais)</option>
                 <option value="MISTO">Misto</option>
@@ -119,16 +167,54 @@ const SubmissionForm: React.FC<SubmissionFormProps> = ({ user }) => {
             </div>
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">Bairro</label>
+              <input
+                type="text"
+                value={bairro}
+                onChange={(e) => setBairro(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                placeholder="Centro"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">Cidade</label>
+              <input
+                type="text"
+                value={cidade}
+                onChange={(e) => setCidade(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                placeholder="São Paulo"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">UF</label>
+              <input
+                type="text"
+                value={uf}
+                onChange={(e) => setUf(e.target.value.toUpperCase())}
+                maxLength={2}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 uppercase"
+                placeholder="SP"
+              />
+            </div>
+          </div>
+
           <div>
             <label className="block text-sm font-semibold text-slate-700 mb-2">Relato / Conteúdo</label>
             <textarea 
               required
               className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 min-h-[120px]"
               placeholder="Descreva o que aconteceu ou o link da postagem..."
-              value={interaction.observacoes}
-              onChange={(e) => setInteraction({...interaction, observacoes: e.target.value})}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
             />
           </div>
+
+          {formError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-600">{formError}</div>
+          )}
 
           <button
             type="submit"

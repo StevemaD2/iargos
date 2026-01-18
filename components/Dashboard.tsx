@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   User,
   UserRole,
@@ -11,12 +11,16 @@ import {
   MemberProfile,
   LeaderZoneSummary,
   ZoneDirectoryEntry,
-  GeoPoint
+  GeoPoint,
+  VoterRecord
 } from '../types';
 import { analyzeSubmissions } from '../services/geminiService';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { supabase } from '../services/supabaseClient';
 import ZonePlanner from './ZonePlanner';
+import SantinhoCard from './SantinhoCard';
+import { fetchOperationVoters, createOperationVoter } from '../services/votersService';
+import { fetchOperationSubmissions } from '../services/submissionsService';
 import {
   fetchHierarchyNotes,
   createHierarchyNote,
@@ -25,15 +29,17 @@ import {
   saveOperationTimeline,
   fetchOperationMembers,
   fetchLeaderAssignments,
-  fetchZoneDirectory
+  fetchZoneDirectory,
+  MISSING_TIMELINE_RESPONSIBLE_COLUMN
 } from '../services/operationSettingsService';
+import { STATE_METADATA } from '../constants/states';
 import {
   updateMemberDailyRate,
   normalizeTimesheet,
   TimesheetData
 } from '../services/memberActivityService';
 
-type DashboardView = 'COMMAND' | 'TEAM' | 'STRUCTURE' | 'CRONOGRAMA' | 'SETTINGS' | 'FINANCE';
+type DashboardView = 'COMMAND' | 'TEAM' | 'STRUCTURE' | 'CRONOGRAMA' | 'SETTINGS' | 'FINANCE' | 'VOTERS';
 type FinanceRoleFilter = 'ALL' | UserRole;
 
 interface DashboardProps {
@@ -41,35 +47,26 @@ interface DashboardProps {
   view?: DashboardView;
 }
 
-const STATE_METADATA: Record<string, { name: string, coords: [number, number], zoom: number }> = {
-  "AC": { name: "Acre", coords: [-9.02, -70.81], zoom: 6 },
-  "AL": { name: "Alagoas", coords: [-9.57, -36.78], zoom: 8 },
-  "AP": { name: "Amapá", coords: [1.41, -51.77], zoom: 6 },
-  "AM": { name: "Amazonas", coords: [-3.41, -65.05], zoom: 5 },
-  "BA": { name: "Bahia", coords: [-12.97, -38.5], zoom: 6 },
-  "CE": { name: "Ceará", coords: [-3.71, -38.54], zoom: 7 },
-  "DF": { name: "Distrito Federal", coords: [-15.78, -47.93], zoom: 10 },
-  "ES": { name: "Espírito Santo", coords: [-19.18, -40.3], zoom: 8 },
-  "GO": { name: "Goiás", coords: [-15.82, -49.83], zoom: 7 },
-  "MA": { name: "Maranhão", coords: [-2.53, -44.3], zoom: 6 },
-  "MT": { name: "Mato Grosso", coords: [-12.64, -55.42], zoom: 6 },
-  "MS": { name: "Mato Grosso do Sul", coords: [-20.44, -54.64], zoom: 7 },
-  "MG": { name: "Minas Gerais", coords: [-18.51, -44.55], zoom: 6 },
-  "PA": { name: "Pará", coords: [-1.45, -48.5], zoom: 5 },
-  "PB": { name: "Paraíba", coords: [-7.11, -34.86], zoom: 8 },
-  "PR": { name: "Paraná", coords: [-24.81, -52.13], zoom: 7 },
-  "PE": { name: "Pernambuco", coords: [-8.28, -35.07], zoom: 7 },
-  "PI": { name: "Piauí", coords: [-5.09, -42.8], zoom: 6 },
-  "RJ": { name: "Rio de Janeiro", coords: [-22.9, -43.17], zoom: 8 },
-  "RN": { name: "Rio Grande do Norte", coords: [-5.79, -35.2], zoom: 8 },
-  "RS": { name: "Rio Grande do Sul", coords: [-30.03, -51.23], zoom: 7 },
-  "RO": { name: "Rondônia", coords: [-11.5, -63.58], zoom: 7 },
-  "RR": { name: "Roraima", coords: [2.82, -60.67], zoom: 6 },
-  "SC": { name: "Santa Catarina", coords: [-27.24, -50.21], zoom: 7 },
-  "SP": { name: "São Paulo", coords: [-23.55, -46.63], zoom: 7 },
-  "SE": { name: "Sergipe", coords: [-10.91, -37.07], zoom: 9 },
-  "TO": { name: "Tocantins", coords: [-10.17, -48.33], zoom: 6 }
+const CAMPAIGN_TYPE_OPTIONS = [
+  { value: 'DEPUTADO_ESTADUAL', label: 'Deputado Estadual' },
+  { value: 'DEPUTADO_FEDERAL', label: 'Deputado Federal' },
+  { value: 'SENADOR', label: 'Senador' },
+  { value: 'GOVERNADOR', label: 'Governador' }
+] as const;
+
+type CampaignTypeValue = (typeof CAMPAIGN_TYPE_OPTIONS)[number]['value'];
+
+type OperationRecord = CandidateSeed & {
+  id: string;
+  nome?: string | null;
+  estado?: string | null;
+  diretor_id?: string | null;
+  slug?: string | null;
+  campaign_type?: CampaignTypeValue | null;
 };
+
+const OPERATION_SELECT_FIELDS =
+  'id, nome, estado, slug, diretor_id, campaign_type, candidate_name, candidate_number, candidate_party, candidate_social_links, candidate_speech, candidate_other_links, candidate_photo_url, candidate_highlights, candidate_santinho_url, theme_primary_color, theme_secondary_color';
 
 const PERMANENT_INVITE_EXPIRATION = '2099-12-31T23:59:59.999Z';
 
@@ -80,6 +77,8 @@ interface InviteSnapshot {
   emitido_por?: string | null;
   expires_at: string | null;
   created_at: string;
+  consumido_por?: string | null;
+  consumido_em?: string | null;
 }
 
 const formatInviteExpiration = (value: string | null) => {
@@ -113,16 +112,76 @@ const SCHEDULE_STATUS_BADGE: Record<CampaignScheduleStatus, string> = {
   ATRASADO: 'bg-red-100 text-red-600'
 };
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type ScheduleFormState = {
+  date: string;
+  title: string;
+  status: CampaignScheduleStatus;
+  responsibleId: string;
+  responsibleName: string;
+};
+
+const VOTER_SENTIMENT_OPTIONS = [
+  { label: 'Positivo', value: VoterSentiment.POSITIVO },
+  { label: 'Neutro', value: VoterSentiment.NEUTRO },
+  { label: 'Negativo', value: VoterSentiment.NEGATIVO }
+];
+
+const VOTER_BOOL_OPTIONS = [
+  { label: 'Selecione', value: '' },
+  { label: 'Sim', value: 'yes' },
+  { label: 'Não', value: 'no' }
+];
+
+type VoterFormState = {
+  name: string;
+  phone: string;
+  city: string;
+  neighborhood: string;
+  sentiment: string;
+  knowsCandidate: string;
+  decidedVote: string;
+  wishes: string;
+  electoralZone: string;
+};
+
+const parseDateValue = (value?: string) => {
+  if (!value) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(Date.UTC(year, month - 1, day));
+};
+
+const createScheduleFormDefaults = (): ScheduleFormState => ({
+  date: new Date().toISOString().split('T')[0],
+  title: '',
+  status: 'PLANEJADO',
+  responsibleId: '',
+  responsibleName: ''
+});
+
+const createVoterFormDefaults = (): VoterFormState => ({
+  name: '',
+  phone: '',
+  city: '',
+  neighborhood: '',
+  sentiment: '',
+  knowsCandidate: '',
+  decidedVote: '',
+  wishes: '',
+  electoralZone: ''
+});
+
 const formatScheduleMonth = (value: string) => {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return '--';
-  return parsed.toLocaleDateString('pt-BR', { month: 'short' }).toUpperCase();
+  const parsed = parseDateValue(value);
+  if (!parsed) return '--';
+  return new Intl.DateTimeFormat('pt-BR', { month: 'short', timeZone: 'UTC' }).format(parsed).toUpperCase();
 };
 
 const formatScheduleDay = (value: string) => {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return '--';
-  return parsed.getDate().toString().padStart(2, '0');
+  const parsed = parseDateValue(value);
+  if (!parsed) return '--';
+  return parsed.getUTCDate().toString().padStart(2, '0');
 };
 
 const getScheduleStatusLabel = (value?: CampaignScheduleStatus) =>
@@ -133,37 +192,149 @@ const normalizeCampaignConfig = (config: CampaignConfig): CampaignConfig => ({
   schedule: (config.schedule || []).map((item) => ({
     ...item,
     status: item.status || 'PLANEJADO',
-    responsibleId: item.responsibleId || null
+    responsibleId: item.responsibleId || null,
+    responsibleName: item.responsibleName || null
   }))
+});
+
+const BASE_CAMPAIGN_CONFIG: CampaignConfig = {
+  state: 'SP',
+  electionDate: '2024-10-04',
+  schedule: [
+    { date: '2024-08-16', title: 'Início Propaganda Eleitoral', status: 'PLANEJADO', responsibleName: null },
+    { date: '2024-09-30', title: 'Fim do Horário Gratuito', status: 'PLANEJADO', responsibleName: null },
+    { date: '2024-10-04', title: 'DIA DA ELEIÇÃO', status: 'PLANEJADO', responsibleName: null }
+  ]
+};
+
+const createDefaultCampaignConfig = (): CampaignConfig =>
+  normalizeCampaignConfig({
+    state: BASE_CAMPAIGN_CONFIG.state,
+    electionDate: BASE_CAMPAIGN_CONFIG.electionDate,
+    schedule: BASE_CAMPAIGN_CONFIG.schedule.map((item) => ({ ...item }))
+  });
+
+const buildCampaignConfigKey = (operationId?: string | null, userId?: string) => {
+  if (operationId) return `iargos_config_op_${operationId}`;
+  if (userId) return `iargos_config_user_${userId}`;
+  return 'iargos_config';
+};
+
+const readCampaignConfigFromStorage = (key: string): CampaignConfig | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const saved = localStorage.getItem(key);
+    if (!saved) return null;
+    return normalizeCampaignConfig(JSON.parse(saved));
+  } catch {
+    return null;
+  }
+};
+
+type CandidateLink = { label?: string | null; url: string };
+type CandidateSeed = {
+  candidate_name?: string | null;
+  candidate_number?: string | null;
+  candidate_party?: string | null;
+  candidate_social_links?: CandidateLink[] | null;
+  candidate_speech?: string | null;
+  candidate_other_links?: CandidateLink[] | null;
+  candidate_photo_url?: string | null;
+  candidate_highlights?: string[] | null;
+  candidate_santinho_url?: string | null;
+  theme_primary_color?: string | null;
+  theme_secondary_color?: string | null;
+};
+
+type CandidateFormState = {
+  name: string;
+  number: string;
+  party: string;
+  speech: string;
+  socialLinks: string;
+  otherLinks: string;
+  photoUrl: string;
+  santinhoUrl: string;
+  highlights: string;
+  colorPrimary: string;
+  colorSecondary: string;
+};
+
+const formatCandidateLinksInput = (links?: CandidateLink[] | null) => {
+  if (!links || links.length === 0) return '';
+  return links
+    .map((entry) => {
+      const url = entry.url?.trim();
+      if (!url) return null;
+      const label = entry.label?.toString().trim();
+      return label ? `${label} | ${url}` : url;
+    })
+    .filter((value): value is string => Boolean(value))
+    .join('\n');
+};
+
+const parseCandidateLinksInput = (value: string): CandidateLink[] => {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const hasDelimiter = line.includes('|');
+      if (!hasDelimiter) {
+        return { label: null, url: line };
+      }
+      const [rawLabel, rawUrl] = line.split('|');
+      const url = (rawUrl || '').trim();
+      const label = (rawLabel || '').trim();
+      if (url) {
+        return { label: label || null, url };
+      }
+      if (label) {
+        return { label: null, url: label };
+      }
+      return null;
+    })
+    .filter((entry): entry is CandidateLink => Boolean(entry && entry.url));
+};
+
+const formatCandidateHighlightsInput = (entries?: string[] | null) => {
+  if (!entries || entries.length === 0) return '';
+  return entries.join('\n');
+};
+
+const parseCandidateHighlightsInput = (value: string) =>
+  value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+const createCandidateFormState = (seed?: CandidateSeed | null): CandidateFormState => ({
+  name: seed?.candidate_name || '',
+  number: seed?.candidate_number || '',
+  party: seed?.candidate_party || '',
+  speech: seed?.candidate_speech || '',
+  socialLinks: formatCandidateLinksInput(seed?.candidate_social_links),
+  otherLinks: formatCandidateLinksInput(seed?.candidate_other_links),
+  photoUrl: seed?.candidate_photo_url || '',
+  santinhoUrl: seed?.candidate_santinho_url || '',
+  highlights: formatCandidateHighlightsInput(seed?.candidate_highlights),
+  colorPrimary: seed?.theme_primary_color || '#4338ca',
+  colorSecondary: seed?.theme_secondary_color || '#0f172a'
 });
 
 const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   const isLeaderRole = [UserRole.L1, UserRole.L2, UserRole.L3].includes(user.role);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [submissionsLoading, setSubmissionsLoading] = useState(false);
   const [aiInsight, setAiInsight] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [aiLoading, setAiLoading] = useState(false);
+  const initialConfigKey = buildCampaignConfigKey(user.operationId, user.id);
   const [campaignConfig, setCampaignConfig] = useState<CampaignConfig>(() => {
-    const saved = localStorage.getItem('iargos_config');
-    if (saved) {
-      try {
-        return normalizeCampaignConfig(JSON.parse(saved));
-      } catch {
-        // ignore and fallback
-      }
-    }
-    return normalizeCampaignConfig({
-      state: 'SP',
-      electionDate: '2024-10-04',
-      schedule: [
-        { date: '2024-08-16', title: 'Início Propaganda Eleitoral', status: 'PLANEJADO' },
-        { date: '2024-09-30', title: 'Fim do Horário Gratuito', status: 'PLANEJADO' },
-        { date: '2024-10-04', title: 'DIA DA ELEIÇÃO', status: 'PLANEJADO' }
-      ]
-    });
+    const stored = readCampaignConfigFromStorage(initialConfigKey);
+    return stored || createDefaultCampaignConfig();
   });
 
-  const [hierarchyNotes, setHierarchyNotes] = useState<HierarchyNote[]>([]);
-  const [operation, setOperation] = useState<{ id: string; nome?: string; estado?: string; diretor_id?: string } | null>(
+  const [operation, setOperation] = useState<OperationRecord | null>(
     () =>
       user.operationId
         ? {
@@ -174,11 +345,22 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
           }
         : null
   );
+  const configStorageKey = useMemo(
+    () => buildCampaignConfigKey(operation?.id || user.operationId, user.id),
+    [operation?.id, user.operationId, user.id]
+  );
+  const configKeyRef = useRef<string | null>(initialConfigKey);
+  const [hierarchyNotes, setHierarchyNotes] = useState<HierarchyNote[]>([]);
+  const [supportsTimelineResponsibleName, setSupportsTimelineResponsibleName] = useState(true);
   const [operationLoading, setOperationLoading] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [operationNameInput, setOperationNameInput] = useState(user.operationName || '');
   const [operationStateInput, setOperationStateInput] = useState(user.operationState || campaignConfig.state);
+  const [operationCampaignType, setOperationCampaignType] = useState<CampaignTypeValue | ''>('');
   const [operationSaving, setOperationSaving] = useState(false);
+  const [operationSuccessMessage, setOperationSuccessMessage] = useState<string | null>(null);
+  const [candidateForm, setCandidateForm] = useState<CandidateFormState>(() => createCandidateFormState());
+  const [santinhoLinkCopied, setSantinhoLinkCopied] = useState(false);
   const [leaderInviteGenerating, setLeaderInviteGenerating] = useState(false);
   const [leaderInviteResult, setLeaderInviteResult] = useState<{ token: string; link: string } | null>(null);
   const [leaderInviteError, setLeaderInviteError] = useState<string | null>(null);
@@ -193,10 +375,18 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   const [inviteRevokingId, setInviteRevokingId] = useState<string | null>(null);
   const [inviteActionError, setInviteActionError] = useState<string | null>(null);
   const [inviteListError, setInviteListError] = useState<string | null>(null);
+  const [inviteConsumptionFeed, setInviteConsumptionFeed] = useState<InviteSnapshot[]>([]);
   const [members, setMembers] = useState<MemberProfile[]>([]);
   const [membersMap, setMembersMap] = useState<Record<string, MemberProfile>>({});
   const [leaderSummaries, setLeaderSummaries] = useState<LeaderZoneSummary[]>([]);
   const [zoneDirectoryData, setZoneDirectoryData] = useState<ZoneDirectoryEntry[]>([]);
+  const leaderOptions = useMemo(
+    () =>
+      [...members]
+        .filter((member) => member.role !== UserRole.SOLDIER)
+        .sort((a, b) => (a.name || '').localeCompare(b.name || '')),
+    [members]
+  );
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState<string | null>(null);
   const [notesLoading, setNotesLoading] = useState(false);
@@ -228,6 +418,49 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [scheduleSuccess, setScheduleSuccess] = useState<string | null>(null);
   const [scheduleDirty, setScheduleDirty] = useState(false);
+  const [scheduleForm, setScheduleForm] = useState<ScheduleFormState>(() => createScheduleFormDefaults());
+  const [editingScheduleIndex, setEditingScheduleIndex] = useState<number | null>(null);
+  const [scheduleFormError, setScheduleFormError] = useState<string | null>(null);
+  const brandPrimary = candidateForm.colorPrimary || '#4338ca';
+  const brandSecondary = candidateForm.colorSecondary || '#0f172a';
+  const [voters, setVoters] = useState<VoterRecord[]>([]);
+  const [votersLoading, setVotersLoading] = useState(false);
+  const [votersError, setVotersError] = useState<string | null>(null);
+  const [voterForm, setVoterForm] = useState<VoterFormState>(() => createVoterFormDefaults());
+  const [voterFormError, setVoterFormError] = useState<string | null>(null);
+  const [voterSaving, setVoterSaving] = useState(false);
+  const [voterSuccess, setVoterSuccess] = useState<string | null>(null);
+  const [voterFormExpanded, setVoterFormExpanded] = useState(user.role !== UserRole.DIRECTOR);
+  const [voterSearch, setVoterSearch] = useState('');
+  const [voterSentimentFilter, setVoterSentimentFilter] = useState('');
+  const [voterKnowledgeFilter, setVoterKnowledgeFilter] = useState('');
+  const [voterDecisionFilter, setVoterDecisionFilter] = useState('');
+  const [voterSort, setVoterSort] = useState<'newest' | 'oldest' | 'name'>('newest');
+
+  const candidatePreview = useMemo(
+    () => {
+      const social = parseCandidateLinksInput(candidateForm.socialLinks);
+      const other = parseCandidateLinksInput(candidateForm.otherLinks);
+      const highlights = parseCandidateHighlightsInput(candidateForm.highlights);
+      const trimmedPhoto = candidateForm.photoUrl.trim();
+      const trimmedSantinho = candidateForm.santinhoUrl.trim();
+      const baseOperationName =
+        operationNameInput.trim() || operation?.nome || user.operationName || '';
+      return {
+        name: candidateForm.name.trim() || baseOperationName,
+        number: candidateForm.number.trim() || '',
+        party: candidateForm.party.trim() || '',
+        speech: candidateForm.speech.trim() || '',
+        photoUrl: trimmedPhoto || trimmedSantinho || '',
+        santinhoUrl: trimmedSantinho || '',
+        socialLinks: social,
+        otherLinks: other,
+        highlights,
+        operationName: baseOperationName
+      };
+    },
+    [candidateForm, operation?.nome, operationNameInput, user.operationName]
+  );
   const [financeSearch, setFinanceSearch] = useState('');
   const [financeRoleFilter, setFinanceRoleFilter] = useState<FinanceRoleFilter>('ALL');
   const [dailyRateDrafts, setDailyRateDrafts] = useState<Record<string, string>>({});
@@ -239,11 +472,19 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     data: { days: [] }
   });
   const [pixCopiedId, setPixCopiedId] = useState<string | null>(null);
+  const financeSummary = useMemo(() => {
+    const totalDaily = members.reduce((sum, member) => sum + (member.dailyRate || 0), 0);
+    const missingPix = members.filter((member) => !member.pix?.trim()).length;
+    const missingCpf = members.filter((member) => !member.cpf?.trim()).length;
+    const missingDailyRate = members.filter((member) => member.dailyRate == null).length;
+    return { totalDaily, missingPix, missingCpf, missingDailyRate };
+  }, [members]);
 
   const refreshInviteLists = useCallback(async () => {
     if (!supabase || !operation?.id) {
       setLeaderInviteHistory([]);
       setSoldierInviteHistory([]);
+      setInviteConsumptionFeed([]);
       setInviteListError(null);
       return;
     }
@@ -251,7 +492,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       setInviteListError(null);
       const { data, error } = await supabase
         .from('convites')
-        .select('id, token, tipo, expires_at, created_at, emitido_por')
+        .select('id, token, tipo, expires_at, created_at, emitido_por, consumido_por, consumido_em')
         .eq('operacao_id', operation.id)
         .order('created_at', { ascending: false })
         .limit(50);
@@ -270,6 +511,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
             (canViewAllSoldierInvites || invite.emitido_por === user.id)
         )
       );
+      const consumed = payload
+        .filter((invite) => Boolean(invite.consumido_em))
+        .sort((a, b) => (b.consumido_em || '').localeCompare(a.consumido_em || ''))
+        .slice(0, 6);
+      setInviteConsumptionFeed(consumed);
     } catch (error) {
       console.error('Erro ao carregar convites ativos', error);
       setInviteListError('Não foi possível carregar a lista de convites ativos.');
@@ -281,8 +527,24 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   }, [refreshInviteLists]);
 
   useEffect(() => {
-    localStorage.setItem('iargos_config', JSON.stringify(campaignConfig));
-  }, [campaignConfig]);
+    if (configKeyRef.current === configStorageKey) return;
+    configKeyRef.current = configStorageKey;
+    const stored = readCampaignConfigFromStorage(configStorageKey);
+    if (stored) {
+      setCampaignConfig(stored);
+    } else {
+      setCampaignConfig(createDefaultCampaignConfig());
+    }
+  }, [configStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(configStorageKey, JSON.stringify(campaignConfig));
+  }, [campaignConfig, configStorageKey]);
+
+  useEffect(() => {
+    setVoterFormExpanded(user.role !== UserRole.DIRECTOR);
+  }, [user.role]);
 
   useEffect(() => {
     const fetchOperation = async () => {
@@ -294,35 +556,43 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
         if (user.role === UserRole.DIRECTOR) {
           response = await supabase
             .from('operacoes')
-            .select('id, nome, estado, diretor_id')
+            .select(OPERATION_SELECT_FIELDS)
             .eq('diretor_id', user.id)
             .limit(1)
             .maybeSingle();
         } else if (user.operationId) {
           response = await supabase
             .from('operacoes')
-            .select('id, nome, estado, diretor_id')
+            .select(OPERATION_SELECT_FIELDS)
             .eq('id', user.operationId)
             .maybeSingle();
         } else {
           setOperation(null);
+          setOperationCampaignType('');
+          setCandidateForm(createCandidateFormState());
           return;
         }
 
         if (response.error) {
           if (response.error.code === 'PGRST116') {
             setOperation(null);
+            setOperationCampaignType('');
+            setCandidateForm(createCandidateFormState());
             return;
           }
           throw response.error;
         }
 
         if (response.data) {
-          setOperation(response.data);
+          setOperation(response.data as OperationRecord);
           setOperationNameInput(response.data.nome || '');
           setOperationStateInput(response.data.estado || campaignConfig.state);
+          setOperationCampaignType((response.data.campaign_type as CampaignTypeValue) || '');
+          setCandidateForm(createCandidateFormState(response.data as CandidateSeed));
         } else {
           setOperation(null);
+          setOperationCampaignType('');
+          setCandidateForm(createCandidateFormState());
         }
       } catch (error) {
         console.error('Supabase operation error', error);
@@ -340,6 +610,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       setCampaignConfig(prev => ({ ...prev, state: operation.estado }));
     }
   }, [operation?.estado]);
+
+  useEffect(() => {
+    setOperationCampaignType((operation?.campaign_type as CampaignTypeValue) || '');
+  }, [operation?.campaign_type]);
 
   useEffect(() => {
     const loadHierarchyNotes = async () => {
@@ -396,18 +670,26 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       if (!operation?.id || !supabase) {
         setTimelineLoading(false);
         setScheduleError(null);
+        setSupportsTimelineResponsibleName(true);
+        setScheduleForm(createScheduleFormDefaults());
+        setEditingScheduleIndex(null);
+        setScheduleFormError(null);
         return;
       }
       setTimelineLoading(true);
       setScheduleError(null);
       try {
-        const { entries, version } = await fetchOperationTimeline(operation.id);
+        const { entries, version, supportsResponsibleName } = await fetchOperationTimeline(operation.id);
+        setSupportsTimelineResponsibleName(supportsResponsibleName);
         if (entries.length) {
           setCampaignConfig((prev) => normalizeCampaignConfig({ ...prev, schedule: entries, version }));
         } else {
           setCampaignConfig((prev) => ({ ...prev, version: 0 }));
         }
         setScheduleDirty(false);
+        setScheduleForm(createScheduleFormDefaults());
+        setEditingScheduleIndex(null);
+        setScheduleFormError(null);
       } catch (error) {
         console.error('Cronograma fetch error', error);
         setScheduleError('Não foi possível carregar o cronograma.');
@@ -455,15 +737,210 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     loadDirectory();
   }, [operation?.id]);
 
+  const loadVoters = useCallback(async () => {
+    if (user.role !== UserRole.DIRECTOR) {
+      setVoters([]);
+      setVotersError(null);
+      return;
+    }
+    if (!operation?.id) {
+      setVoters([]);
+      setVotersError(null);
+      return;
+    }
+    setVotersLoading(true);
+    setVotersError(null);
+    try {
+      const data = await fetchOperationVoters(operation.id);
+      setVoters(data);
+    } catch (error) {
+      console.error('Operation voters fetch error', error);
+      setVotersError('Não foi possível carregar os eleitores cadastrados.');
+    } finally {
+      setVotersLoading(false);
+    }
+  }, [operation?.id, user.role]);
+
+  useEffect(() => {
+    loadVoters();
+  }, [loadVoters]);
+
+  const filteredVoters = useMemo(() => {
+    let list = [...voters];
+    const searchTerm = voterSearch.trim().toLowerCase();
+    if (searchTerm) {
+      list = list.filter((record) => {
+        const haystack = [
+          record.name,
+          record.phone,
+          record.city,
+          record.neighborhood,
+          record.wishes,
+          record.electoralZone
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(searchTerm);
+      });
+    }
+    if (voterSentimentFilter) {
+      list = list.filter((record) => record.sentiment === voterSentimentFilter);
+    }
+    const matchBoolFilter = (value: boolean | null | undefined, filterValue: string) => {
+      if (!filterValue) return true;
+      const boolValue = filterValue === 'yes';
+      return value === boolValue;
+    };
+    if (voterKnowledgeFilter) {
+      list = list.filter((record) => matchBoolFilter(record.knowsCandidate, voterKnowledgeFilter));
+    }
+    if (voterDecisionFilter) {
+      list = list.filter((record) => matchBoolFilter(record.decidedVote, voterDecisionFilter));
+    }
+    list.sort((a, b) => {
+      if (voterSort === 'name') {
+        return a.name.localeCompare(b.name);
+      }
+      if (voterSort === 'oldest') {
+        return a.createdAt.localeCompare(b.createdAt);
+      }
+      // newest
+      return b.createdAt.localeCompare(a.createdAt);
+    });
+    return list;
+  }, [
+    voters,
+    voterSearch,
+    voterSentimentFilter,
+    voterKnowledgeFilter,
+    voterDecisionFilter,
+    voterSort
+  ]);
+
+  const handleExportVoters = () => {
+    if (!filteredVoters.length) return;
+    const header = [
+      'Nome',
+      'Telefone',
+      'Cidade',
+      'Bairro',
+      'Sentimento',
+      'Conhece candidato',
+      'Voto definido',
+      'Desejos',
+      'Zona eleitoral',
+      'Registrado por',
+      'Data'
+    ];
+    const rows = filteredVoters.map((record) => [
+      csvEscape(record.name),
+      csvEscape(record.phone),
+      csvEscape(record.city || ''),
+      csvEscape(record.neighborhood || ''),
+      csvEscape(
+        VOTER_SENTIMENT_OPTIONS.find((option) => option.value === record.sentiment)?.label || ''
+      ),
+      csvEscape(formatBooleanDisplay(record.knowsCandidate)),
+      csvEscape(formatBooleanDisplay(record.decidedVote)),
+      csvEscape(record.wishes || ''),
+      csvEscape(record.electoralZone || ''),
+      csvEscape(record.recordedByName || ''),
+      csvEscape(new Date(record.createdAt).toLocaleString('pt-BR'))
+    ]);
+    const csvContent = [header.map((value) => csvEscape(value)).join(','), ...rows.map((cells) => cells.join(','))].join(
+      '\n'
+    );
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const filename = `eleitores-${operation?.slug || 'operacao'}-${Date.now()}.csv`;
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const slugifyName = (value: string) => {
     return value
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .substring(0, 50) || `op-${Date.now().toString(36)}`;
-  };
+  .replace(/^-+|-+$/g, '')
+  .substring(0, 50) || `op-${Date.now().toString(36)}`;
+};
+
+const parseBooleanSelect = (value: string): boolean | null => {
+  if (value === 'yes') return true;
+  if (value === 'no') return false;
+  return null;
+};
+
+const formatBooleanDisplay = (value?: boolean | null) => {
+  if (value === true) return 'Sim';
+  if (value === false) return 'Não';
+  return '—';
+};
+
+const csvEscape = (value?: string | null) => {
+  if (value == null) return '""';
+  const sanitized = value.replace(/"/g, '""');
+  return `"${sanitized}"`;
+};
+
+const handleCandidateFormChange = (field: keyof CandidateFormState, value: string) => {
+  setCandidateForm((prev) => ({ ...prev, [field]: value }));
+};
+
+const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
+  setVoterForm((prev) => ({ ...prev, [field]: value }));
+};
+
+  const handleVoterFormSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!operation?.id) {
+      setVoterFormError('Configure uma operação antes de registrar eleitores.');
+      return;
+    }
+  const trimmedName = voterForm.name.trim();
+  const trimmedPhone = voterForm.phone.trim();
+  if (!trimmedName || !trimmedPhone) {
+    setVoterFormError('Informe nome e telefone do eleitor.');
+    return;
+  }
+
+  setVoterSaving(true);
+  setVoterFormError(null);
+  setVoterSuccess(null);
+  try {
+    const payload = {
+      name: trimmedName,
+      phone: trimmedPhone,
+      city: voterForm.city.trim() || undefined,
+      neighborhood: voterForm.neighborhood.trim() || undefined,
+      sentiment: (voterForm.sentiment as VoterSentiment) || null,
+      knowsCandidate: parseBooleanSelect(voterForm.knowsCandidate),
+      decidedVote: parseBooleanSelect(voterForm.decidedVote),
+      wishes: voterForm.wishes.trim() || undefined,
+      electoralZone: voterForm.electoralZone.trim() || undefined,
+      recordedByName: user.name
+    };
+      const recordedById = user.role === UserRole.DIRECTOR ? undefined : user.id;
+      const record = await createOperationVoter(operation.id, payload, recordedById);
+      setVoterSuccess('Eleitor registrado com sucesso.');
+      setVoterForm(createVoterFormDefaults());
+      setVoters((prev) => (user.role === UserRole.DIRECTOR ? [record, ...prev] : prev));
+  } catch (error) {
+    console.error('Voter save error', error);
+    setVoterFormError('Não foi possível salvar o eleitor agora.');
+  } finally {
+    setVoterSaving(false);
+    setTimeout(() => setVoterSuccess(null), 3500);
+  }
+};
 
   const handleOperationSave = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -480,30 +957,49 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       setOperationError('Selecione o estado da operação.');
       return;
     }
+    if (!operationCampaignType) {
+      setOperationError('Selecione o cargo em disputa.');
+      return;
+    }
 
     setOperationSaving(true);
     setOperationError(null);
+    setOperationSuccessMessage(null);
     try {
-    const basePayload = {
-      nome: trimmedName,
-      estado: operationStateInput,
-      diretor_id: user.id
-    };
+      const socialLinks = parseCandidateLinksInput(candidateForm.socialLinks);
+      const otherLinks = parseCandidateLinksInput(candidateForm.otherLinks);
+      const highlightEntries = parseCandidateHighlightsInput(candidateForm.highlights);
+      const candidatePayload = {
+        candidate_name: candidateForm.name.trim() || null,
+        candidate_number: candidateForm.number.trim() || null,
+        candidate_party: candidateForm.party.trim() || null,
+        candidate_speech: candidateForm.speech.trim() || null,
+        candidate_photo_url: candidateForm.photoUrl.trim() || null,
+        candidate_santinho_url: candidateForm.santinhoUrl.trim() || null,
+        candidate_social_links: socialLinks.length ? socialLinks : null,
+        candidate_other_links: otherLinks.length ? otherLinks : null,
+        candidate_highlights: highlightEntries.length ? highlightEntries : null,
+        theme_primary_color: candidateForm.colorPrimary || null,
+        theme_secondary_color: candidateForm.colorSecondary || null
+      };
+
+      const basePayload = {
+        nome: trimmedName,
+        estado: operationStateInput,
+        diretor_id: user.id,
+        campaign_type: operationCampaignType,
+        ...candidatePayload
+      };
 
     const persist = async (slugValue: string) => {
       const payload = { ...basePayload, slug: slugValue };
       if (operation) {
-        return supabase
-          .from('operacoes')
-          .update(payload)
-          .eq('id', operation.id)
-          .select('id, nome, estado, diretor_id')
-          .single();
+        return supabase.from('operacoes').update(payload).eq('id', operation.id).select(OPERATION_SELECT_FIELDS).single();
       }
       return supabase
         .from('operacoes')
         .insert(payload)
-        .select('id, nome, estado, diretor_id')
+        .select(OPERATION_SELECT_FIELDS)
         .single();
     };
 
@@ -515,7 +1011,9 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
 
     if (response.error) throw response.error;
     if (response.data) {
-      setOperation(response.data);
+      setOperation(response.data as OperationRecord);
+      setCandidateForm(createCandidateFormState(response.data as CandidateSeed));
+      setOperationSuccessMessage('Configurações salvas com sucesso.');
     }
     } catch (error) {
       console.error('Supabase operation save error', error);
@@ -537,6 +1035,39 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}` : '';
     return `${baseUrl}#/login?token=${token}`;
   };
+
+  const handleCopySantinhoLink = async () => {
+    const link = buildSantinhoLink();
+    if (!link) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(link);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = link;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setSantinhoLinkCopied(true);
+      setTimeout(() => setSantinhoLinkCopied(false), 2000);
+    } catch (error) {
+      console.error('Clipboard error', error);
+    }
+  };
+  const buildSantinhoLink = useCallback(() => {
+    if (typeof window === 'undefined' || !operation?.slug) return '';
+    const baseUrl = `${window.location.origin}${window.location.pathname}`;
+    return `${baseUrl}#/santinho/${operation.slug}`;
+  }, [operation?.slug]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    root.style.setProperty('--iargos-brand-primary', brandPrimary);
+    root.style.setProperty('--iargos-brand-secondary', brandSecondary);
+  }, [brandPrimary, brandSecondary]);
 
   const createInvite = async (
     type: 'LEADER' | 'SOLDIER',
@@ -906,48 +1437,100 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     }
   };
 
-  const handleScheduleFieldChange = (
-    index: number,
-    field: 'title' | 'date' | 'status' | 'responsibleId',
-    value: string
-  ) => {
+  const resetScheduleForm = () => {
+    setScheduleForm(createScheduleFormDefaults());
+    setEditingScheduleIndex(null);
+    setScheduleFormError(null);
+  };
+
+  const handleScheduleFormInputChange = (field: 'title' | 'date' | 'status', value: string) => {
+    setScheduleForm((prev) => ({
+      ...prev,
+      [field]: field === 'status' ? (value as CampaignScheduleStatus) : value
+    }));
+    if (scheduleFormError) setScheduleFormError(null);
+  };
+
+  const handleScheduleFormLeaderSelect = (value: string) => {
+    setScheduleForm((prev) => ({
+      ...prev,
+      responsibleId: value,
+      responsibleName: value ? '' : prev.responsibleName
+    }));
+    if (scheduleFormError) setScheduleFormError(null);
+  };
+
+  const handleScheduleFormResponsibleNameChange = (value: string) => {
+    setScheduleForm((prev) => ({
+      ...prev,
+      responsibleName: value,
+      responsibleId: value.trim().length ? '' : prev.responsibleId
+    }));
+    if (scheduleFormError) setScheduleFormError(null);
+  };
+
+  const handleScheduleEdit = (index: number) => {
+    const target = campaignConfig.schedule[index];
+    if (!target) return;
+    setScheduleForm({
+      date: target.date,
+      title: target.title,
+      status: (target.status || 'PLANEJADO') as CampaignScheduleStatus,
+      responsibleId: target.responsibleName ? '' : target.responsibleId || '',
+      responsibleName: target.responsibleName || ''
+    });
+    setEditingScheduleIndex(index);
+    setScheduleFormError(null);
+    setScheduleSuccess(null);
+  };
+
+  const handleScheduleFormSubmit = () => {
+    if (!scheduleForm.date || !scheduleForm.title.trim()) {
+      setScheduleFormError('Informe a data e o título do marco.');
+      return;
+    }
+    const entry = {
+      date: scheduleForm.date,
+      title: scheduleForm.title.trim(),
+      status: scheduleForm.status as CampaignScheduleStatus,
+      responsibleId: scheduleForm.responsibleName.trim() ? null : scheduleForm.responsibleId || null,
+      responsibleName: scheduleForm.responsibleName.trim() || null
+    };
     setCampaignConfig((prev) => {
-      const nextSchedule = prev.schedule.map((item, idx) => {
-        if (idx !== index) return item;
-        if (field === 'status') {
-          return { ...item, status: value as CampaignScheduleStatus };
-        }
-        return { ...item, [field]: value };
-      });
-      return { ...prev, schedule: nextSchedule };
+      const schedule = [...prev.schedule];
+      if (typeof editingScheduleIndex === 'number' && schedule[editingScheduleIndex]) {
+        schedule[editingScheduleIndex] = { ...schedule[editingScheduleIndex], ...entry };
+      } else {
+        schedule.push(entry);
+      }
+      return { ...prev, schedule };
     });
     setScheduleDirty(true);
     setScheduleSuccess(null);
-  };
-
-  const handleAddScheduleItem = () => {
-    setCampaignConfig((prev) => ({
-      ...prev,
-      schedule: [
-        ...prev.schedule,
-        {
-          date: new Date().toISOString().split('T')[0],
-          title: 'Novo marco',
-          status: 'PLANEJADO'
-        }
-      ]
-    }));
-    setScheduleDirty(true);
-    setScheduleSuccess(null);
+    setScheduleFormError(null);
+    resetScheduleForm();
   };
 
   const handleRemoveScheduleItem = (index: number) => {
+    const target = campaignConfig.schedule[index];
+    if (!target) return;
+    if (typeof window !== 'undefined') {
+      const confirmed = window.confirm(`Remover o marco "${target.title}"?`);
+      if (!confirmed) return;
+    }
     setCampaignConfig((prev) => ({
       ...prev,
       schedule: prev.schedule.filter((_, idx) => idx !== index)
     }));
     setScheduleDirty(true);
     setScheduleSuccess(null);
+    if (editingScheduleIndex !== null) {
+      if (editingScheduleIndex === index) {
+        resetScheduleForm();
+      } else if (editingScheduleIndex > index) {
+        setEditingScheduleIndex((prevIndex) => (typeof prevIndex === 'number' ? prevIndex - 1 : null));
+      }
+    }
   };
 
   const handleSaveChronogram = async () => {
@@ -955,13 +1538,19 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       setScheduleError('Configure a operação antes de salvar o cronograma.');
       return;
     }
+    const normalizeResponsibleId = (value?: string | null) => {
+      if (!value) return null;
+      const trimmed = value.trim();
+      return UUID_REGEX.test(trimmed) ? trimmed : null;
+    };
     const validEntries = campaignConfig.schedule
       .map((item) => ({
         ...item,
         title: item.title.trim(),
         date: item.date,
         status: (item.status || 'PLANEJADO') as CampaignScheduleStatus,
-        responsibleId: item.responsibleId?.trim() || null
+        responsibleId: item.responsibleName?.trim() ? null : normalizeResponsibleId(item.responsibleId),
+        responsibleName: item.responsibleName?.trim() || null
       }))
       .filter((item) => item.date && item.title);
 
@@ -973,7 +1562,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     setScheduleSaving(true);
     setScheduleError(null);
     try {
-      const result = await saveOperationTimeline(operation.id, validEntries, user.id);
+      const result = await saveOperationTimeline(operation.id, validEntries);
       setCampaignConfig((prev) => ({
         ...prev,
         schedule: result.entries,
@@ -984,7 +1573,12 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       setTimeout(() => setScheduleSuccess(null), 3000);
     } catch (error) {
       console.error('Cronograma save error', error);
-      setScheduleError('Não foi possível salvar o cronograma agora.');
+      if ((error as any)?.code === MISSING_TIMELINE_RESPONSIBLE_COLUMN) {
+        setScheduleError('Adicione a coluna responsavel_nome (text) em cronogramas_operacao para salvar nomes personalizados.');
+        setSupportsTimelineResponsibleName(false);
+      } else {
+        setScheduleError('Não foi possível salvar o cronograma agora.');
+      }
     } finally {
       setScheduleSaving(false);
     }
@@ -1008,6 +1602,12 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
 
   const resolveMemberResponsible = (member: MemberProfile) => {
     return resolveMemberLabel(member.leaderId) || (member.role === UserRole.SOLDIER ? 'Sem líder definido' : 'Direção');
+  };
+
+  const resolveScheduleResponsible = (item: CampaignScheduleItem) => {
+    const manual = item.responsibleName?.trim();
+    if (manual) return manual;
+    return resolveMemberLabel(item.responsibleId);
   };
 
   const formatRoleLabel = (role: UserRole) => {
@@ -1035,6 +1635,19 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   const formatPhoneDisplay = (value?: string | null) => {
     if (!value) return '--';
     return value.trim();
+  };
+
+  const formatCurrency = (value: number) =>
+    new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+
+  const formatDateTimeLabel = (value?: string | null) => {
+    if (!value) return '--';
+    return new Date(value).toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
 
   const sanitizePhoneNumber = (value?: string | null) => {
@@ -1136,47 +1749,63 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   };
 
   useEffect(() => {
-    const mockData: Submission[] = [
-      {
-        id: '1',
-        userId: 'u1',
-        userName: 'Operador Alfa',
-        leaderChain: ['l3', 'l2', 'l1', 'dir'],
-        type: 'TEXTO_RELATO' as any,
-        timestamp: new Date().toISOString(),
-        geo: { lat: -23.5505, lng: -46.6333, accuracy: 10 },
-        locationDetails: { bairro: 'Centro', cidade: 'São Paulo', uf: campaignConfig.state },
-        context: 'RUA',
-        content: 'Eleitorado local demonstra forte preocupação com infraestrutura básica.',
-        voterInteraction: {
-          foi_atendido: 'BEM',
-          intencao_voto: 'EM_DUVIDA' as any,
-          temas_mencionados: ['Segurança', 'Saúde', 'Infraestrutura'],
-          sentimento: VoterSentiment.NEUTRO,
-          principais_frases: 'As ruas estão abandonadas.',
-          objecoes: ['Atraso em obras'],
-          oportunidades: ['Promessa de pavimentação'],
-          urgencia_followup: 'MEDIA',
-          observacoes: ''
-        }
+    const loadSubmissions = async () => {
+      if (!operation?.id) {
+        setSubmissions([]);
+        setAiInsight(null);
+        return;
       }
-    ];
-    setSubmissions(mockData);
-
-    const fetchAI = async () => {
-      const insight = await analyzeSubmissions(mockData, user.role);
-      setAiInsight(insight);
-      setLoading(false);
+      setSubmissionsLoading(true);
+      try {
+        const data = await fetchOperationSubmissions(operation.id);
+        setSubmissions(data);
+        if (data.length) {
+          setAiLoading(true);
+          const insight = await analyzeSubmissions(data.slice(0, 20), user.role);
+          setAiInsight(insight);
+        } else {
+          setAiInsight(null);
+        }
+      } catch (error) {
+        console.error('Submissions fetch error', error);
+        setAiInsight(null);
+      } finally {
+        setSubmissionsLoading(false);
+        setAiLoading(false);
+      }
     };
-    fetchAI();
-  }, [user.role, campaignConfig.state]);
+    loadSubmissions();
+  }, [operation?.id, user.role]);
 
-  const statsData = [
-    { name: 'Positivo', value: 12 },
-    { name: 'Neutro', value: 45 },
-    { name: 'Negativo', value: 18 },
-  ];
+  const sentimentChartData = useMemo(() => {
+    const data = [
+      { name: 'Positivo', key: VoterSentiment.POSITIVO, value: 0 },
+      { name: 'Neutro', key: VoterSentiment.NEUTRO, value: 0 },
+      { name: 'Negativo', key: VoterSentiment.NEGATIVO, value: 0 }
+    ];
+    submissions.forEach((submission) => {
+      const sentiment = submission.voterInteraction?.sentimento;
+      const entry = data.find((item) => item.key === sentiment);
+      if (entry) entry.value += 1;
+    });
+    return data;
+  }, [submissions]);
 
+  const topNeighborhoodData = useMemo(() => {
+    const counter: Record<string, number> = {};
+    submissions.forEach((submission) => {
+      const bairro = submission.locationDetails?.bairro?.trim();
+      if (bairro) {
+        counter[bairro] = (counter[bairro] || 0) + 1;
+      }
+    });
+    return Object.entries(counter)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+  }, [submissions]);
+
+  const totalSubmissions = submissions.length;
   const COLORS = ['#10b981', '#6366f1', '#ef4444'];
 
   const renderOperationConfigCard = () => (
@@ -1219,14 +1848,222 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
               ))}
             </select>
           </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Cargo em disputa</label>
+            <select
+              value={operationCampaignType}
+              onChange={(e) => setOperationCampaignType(e.target.value as CampaignTypeValue | '')}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">Selecione o cargo desta operação</option>
+              {CAMPAIGN_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="pt-4 border-t border-slate-100 space-y-4">
+            <div>
+              <p className="text-xs font-bold text-slate-500 uppercase">Perfil do candidato</p>
+              <p className="text-sm text-slate-500">Dados exibidos em materiais internos e dashboards.</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Nome completo</label>
+                <input
+                  type="text"
+                  value={candidateForm.name}
+                  onChange={(e) => handleCandidateFormChange('name', e.target.value)}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Ex: João Silva"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Número na urna</label>
+                <input
+                  type="text"
+                  value={candidateForm.number}
+                  onChange={(e) => handleCandidateFormChange('number', e.target.value)}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Ex: 22"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Partido</label>
+                <input
+                  type="text"
+                  value={candidateForm.party}
+                  onChange={(e) => handleCandidateFormChange('party', e.target.value)}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Ex: PL"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Foto do candidato (URL)</label>
+                <input
+                  type="text"
+                  value={candidateForm.photoUrl}
+                  onChange={(e) => handleCandidateFormChange('photoUrl', e.target.value)}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="https://..."
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Santinho digital (URL)</label>
+                <input
+                  type="text"
+                  value={candidateForm.santinhoUrl}
+                  onChange={(e) => handleCandidateFormChange('santinhoUrl', e.target.value)}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="https://..."
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Cor primária</label>
+                <div className="mt-2 flex items-center gap-3">
+                  <input
+                    type="color"
+                    value={candidateForm.colorPrimary}
+                    onChange={(e) => handleCandidateFormChange('colorPrimary', e.target.value)}
+                    className="w-12 h-12 rounded-xl border border-slate-200 cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    value={candidateForm.colorPrimary}
+                    onChange={(e) => handleCandidateFormChange('colorPrimary', e.target.value)}
+                    className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                    placeholder="#4338ca"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Cor secundária</label>
+                <div className="mt-2 flex items-center gap-3">
+                  <input
+                    type="color"
+                    value={candidateForm.colorSecondary}
+                    onChange={(e) => handleCandidateFormChange('colorSecondary', e.target.value)}
+                    className="w-12 h-12 rounded-xl border border-slate-200 cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    value={candidateForm.colorSecondary}
+                    onChange={(e) => handleCandidateFormChange('colorSecondary', e.target.value)}
+                    className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                    placeholder="#0f172a"
+                  />
+                </div>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-500 uppercase">Discurso / Manifesto</label>
+              <textarea
+                value={candidateForm.speech}
+                onChange={(e) => handleCandidateFormChange('speech', e.target.value)}
+                rows={4}
+                className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                placeholder="Mensagem-chave apresentada à tropa."
+              />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Links de redes sociais</label>
+                <textarea
+                  value={candidateForm.socialLinks}
+                  onChange={(e) => handleCandidateFormChange('socialLinks', e.target.value)}
+                  rows={4}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Instagram | https://instagram.com/candidato"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">Use uma linha por link no formato NOME | URL.</p>
+              </div>
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase">Outros links úteis</label>
+                <textarea
+                  value={candidateForm.otherLinks}
+                  onChange={(e) => handleCandidateFormChange('otherLinks', e.target.value)}
+                  rows={4}
+                  className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Plano de Governo | https://..."
+                />
+                <p className="mt-1 text-[11px] text-slate-500">Linha por link, também no formato NOME | URL.</p>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-500 uppercase">Feitos importantes</label>
+              <textarea
+                value={candidateForm.highlights}
+                onChange={(e) => handleCandidateFormChange('highlights', e.target.value)}
+                rows={4}
+                className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                placeholder="Linha por feito / marco da trajetória."
+              />
+              <p className="mt-1 text-[11px] text-slate-500">Separe cada feito em uma linha.</p>
+            </div>
+            <div className="pt-2">
+              <label className="text-xs font-bold text-slate-500 uppercase">Santinho digital</label>
+              {operation?.slug ? (
+                <div className="mt-2 flex flex-col gap-2">
+                  <div className="flex flex-col md:flex-row md:items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={buildSantinhoLink()}
+                      className="flex-1 border border-slate-200 rounded-xl px-4 py-2 text-sm bg-slate-50 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCopySantinhoLink}
+                      className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold hover:bg-slate-50"
+                    >
+                      {santinhoLinkCopied ? 'Link copiado!' : 'Copiar link'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Compartilhe com apoiadores: qualquer pessoa com o link pode visualizar o santinho digital.
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-slate-500">
+                  Salve a operação primeiro para gerar o link compartilhável.
+                </p>
+              )}
+            </div>
+            <div className="pt-6 border-t border-slate-100 space-y-3">
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase">Prévia em tempo real</p>
+                <p className="text-sm text-slate-500">As cores definidas acima também se aplicam à plataforma.</p>
+              </div>
+              <div className="flex justify-center">
+                <SantinhoCard
+                  name={candidatePreview.name}
+                  number={candidatePreview.number}
+                  party={candidatePreview.party}
+                  speech={candidatePreview.speech}
+                  photoUrl={candidatePreview.photoUrl}
+                  santinhoUrl={candidatePreview.santinhoUrl}
+                  highlights={candidatePreview.highlights.length ? candidatePreview.highlights : undefined}
+                  socialLinks={candidatePreview.socialLinks}
+                  otherLinks={candidatePreview.otherLinks}
+                  operationName={candidatePreview.operationName}
+                  brandPrimary={brandPrimary}
+                  brandSecondary={brandSecondary}
+                />
+              </div>
+            </div>
+          </div>
           <button
             type="submit"
             disabled={operationSaving}
-            className="w-full py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="brand-btn w-full py-3 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {operationSaving ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-save"></i>}
             {operation ? 'Atualizar Operação' : 'Registrar Operação'}
           </button>
+          {operationSuccessMessage && <p className="text-sm text-emerald-600">{operationSuccessMessage}</p>}
           {operationError && <p className="text-sm text-red-500">{operationError}</p>}
         </form>
       )}
@@ -1251,7 +2088,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
             type="button"
             onClick={handleDirectorInvite}
             disabled={leaderInviteGenerating}
-            className="w-full py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="brand-btn w-full py-3 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {leaderInviteGenerating ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-bolt"></i>}
             Gerar link para Líder
@@ -1429,7 +2266,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
             type="button"
             onClick={handleLeaderInvite}
             disabled={soldierInviteGenerating}
-            className="w-full py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="brand-btn w-full py-3 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {soldierInviteGenerating ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-bolt"></i>}
             Gerar link para Soldado
@@ -1655,18 +2492,33 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
         <div className="space-y-6 xl:col-span-2">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-              <h4 className="font-bold mb-6 text-slate-800 flex items-center gap-2">
-                <i className="fas fa-heart text-indigo-500"></i> Sentimento Regional
-              </h4>
+              <div className="flex items-center justify-between mb-6">
+                <h4 className="font-bold text-slate-800 flex items-center gap-2">
+                  <i className="fas fa-heart text-indigo-500"></i> Sentimento Regional
+                </h4>
+                <span className="text-[11px] font-black text-slate-400 uppercase">
+                  {totalSubmissions} relatos
+                </span>
+              </div>
               <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={statsData} cx="50%" cy="50%" innerRadius={70} outerRadius={95} paddingAngle={10} dataKey="value">
-                      {statsData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />)}
-                    </Pie>
-                    <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' }} />
-                  </PieChart>
-                </ResponsiveContainer>
+                {submissionsLoading ? (
+                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">Carregando inteligência...</div>
+                ) : sentimentChartData.every((entry) => entry.value === 0) ? (
+                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">
+                    Nenhum dado de sentimento ainda.
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={sentimentChartData} cx="50%" cy="50%" innerRadius={70} outerRadius={95} paddingAngle={10} dataKey="value">
+                        {sentimentChartData.map((entry, index) => (
+                          <Cell key={`cell-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                        ))}
+                      </Pie>
+                      <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </div>
             <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
@@ -1674,15 +2526,23 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                 <i className="fas fa-chart-simple text-indigo-500"></i> Eficiência por Bairro
               </h4>
               <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={statsData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 700 }} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} />
-                    <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '15px', border: 'none' }} />
-                    <Bar dataKey="value" fill="#6366f1" radius={[10, 10, 0, 0]} barSize={45} />
-                  </BarChart>
-                </ResponsiveContainer>
+                {submissionsLoading ? (
+                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">Carregando dados...</div>
+                ) : topNeighborhoodData.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">
+                    Cadastre relatos com bairro para visualizar.
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={topNeighborhoodData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 700 }} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} allowDecimals={false} />
+                      <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '15px', border: 'none' }} />
+                      <Bar dataKey="value" fill="#6366f1" radius={[10, 10, 0, 0]} barSize={45} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </div>
           </div>
@@ -1700,7 +2560,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                 <h3 className="text-xl font-black tracking-tight uppercase">SÍNTESE IA</h3>
              </div>
              
-             {loading ? (
+             {aiLoading ? (
                <div className="space-y-4 animate-pulse">
                  <div className="h-4 bg-white/10 rounded w-3/4"></div>
                  <div className="h-40 bg-white/10 rounded"></div>
@@ -1744,7 +2604,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                    </div>
                  )}
                </div>
-             ) : null}
+             ) : (
+               <div className="text-sm text-indigo-100/70">
+                 Ainda sem dados suficientes para gerar a síntese. Solicite relatos no campo e tente novamente.
+               </div>
+             )}
           </div>
           
           {user.role !== UserRole.DIRECTOR && (
@@ -1869,10 +2733,13 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                   key={option.value}
                   onClick={() => handleNoteComposerChange('scope', option.value)}
                   className={`px-3 py-2 rounded-xl border text-xs font-bold ${
-                    noteComposer.targetScope === option.value
-                      ? 'bg-indigo-600 text-white border-indigo-600'
-                      : 'bg-white text-slate-500 border-slate-200'
+                    noteComposer.targetScope === option.value ? 'text-white' : 'bg-white text-slate-500 border-slate-200'
                   }`}
+                  style={
+                    noteComposer.targetScope === option.value
+                      ? { backgroundColor: brandPrimary, borderColor: brandPrimary }
+                      : undefined
+                  }
                 >
                   {option.label}
                 </button>
@@ -1893,10 +2760,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                       key={`select-leader-${leader.id}`}
                       onClick={() => toggleLeaderRecipient(leader.id)}
                       className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
-                        isSelected
-                          ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-500 border-slate-200'
+                        isSelected ? 'text-white' : 'bg-white text-slate-500 border-slate-200'
                       }`}
+                      style={
+                        isSelected ? { backgroundColor: brandPrimary, borderColor: brandPrimary } : undefined
+                      }
                     >
                       {leader.name} · {subordinateCountMap[leader.id] || 0} soldados
                     </button>
@@ -1919,10 +2787,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                       key={`select-zone-${zone.id}`}
                       onClick={() => toggleZoneRecipient(zone.id)}
                       className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
-                        isSelected
-                          ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-500 border-slate-200'
+                        isSelected ? 'text-white' : 'bg-white text-slate-500 border-slate-200'
                       }`}
+                      style={
+                        isSelected ? { backgroundColor: brandPrimary, borderColor: brandPrimary } : undefined
+                      }
                     >
                       {zone.name} · {zone.leaderIds.length} líder(es)
                     </button>
@@ -1944,10 +2813,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                       key={`select-subzone-${subzone.id}`}
                       onClick={() => toggleSubzoneRecipient(subzone.id)}
                       className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
-                        isSelected
-                          ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-500 border-slate-200'
+                        isSelected ? 'text-white' : 'bg-white text-slate-500 border-slate-200'
                       }`}
+                      style={
+                        isSelected ? { backgroundColor: brandPrimary, borderColor: brandPrimary } : undefined
+                      }
                     >
                       {subzone.name}
                     </button>
@@ -1970,11 +2840,14 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                         type="button"
                         key={`select-member-${member.id}`}
                         onClick={() => toggleMemberRecipient(member.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
-                          isSelected
-                            ? 'bg-indigo-600 text-white border-indigo-600'
-                            : 'bg-white text-slate-500 border-slate-200'
-                        }`}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
+                      isSelected ? 'text-white' : 'bg-white text-slate-500 border-slate-200'
+                    }`}
+                    style={
+                      isSelected
+                        ? { backgroundColor: brandPrimary, borderColor: brandPrimary }
+                        : undefined
+                    }
                       >
                         {member.name}
                       </button>
@@ -2000,7 +2873,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
               type="button"
               onClick={handleNoteCreate}
               disabled={noteActionLoading || notesFeatureBlocked}
-              className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-2 disabled:opacity-50"
+              className="brand-btn px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 disabled:opacity-50"
             >
               {noteActionLoading ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-paper-plane"></i>}
               Lançar Nota
@@ -2072,22 +2945,108 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
         </div>
       </div>
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-6">
-        <div>
-          <label className="block text-xs font-bold text-slate-500 uppercase mb-3">Estado em Operação</label>
-          <div className="grid grid-cols-6 md:grid-cols-9 gap-2">
-            {Object.keys(STATE_METADATA).map(uf => (
-              <button 
-                key={uf}
-                onClick={() => setCampaignConfig({...campaignConfig, state: uf})}
-                className={`p-2 rounded-lg text-[10px] font-black border transition-all ${
-                  campaignConfig.state === uf 
-                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-600/30' 
-                    : 'bg-white text-slate-400 border-slate-200 hover:border-indigo-300'
-                }`}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-bold text-slate-500 uppercase">Gerenciar marcos</p>
+              <p className="text-sm text-slate-500">
+                {editingScheduleIndex !== null ? 'Editando um marco existente' : 'Adicione marcos importantes da operação'}
+              </p>
+            </div>
+            {editingScheduleIndex !== null && (
+              <button
+                type="button"
+                onClick={resetScheduleForm}
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-500"
               >
-                {uf}
+                Cancelar edição
               </button>
-            ))}
+            )}
+          </div>
+          {scheduleFormError && (
+            <div className="p-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl">{scheduleFormError}</div>
+          )}
+          {!supportsTimelineResponsibleName && (
+            <div className="p-3 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl">
+              Para salvar nomes personalizados de responsáveis, adicione a coluna <code className="font-mono">responsavel_nome</code> (TEXT) na tabela <code className="font-mono">cronogramas_operacao</code>.
+            </div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-7 gap-3 items-end">
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Data</label>
+              <input
+                type="date"
+                value={scheduleForm.date}
+                onChange={(e) => handleScheduleFormInputChange('date', e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Título</label>
+              <input
+                type="text"
+                value={scheduleForm.title}
+                onChange={(e) => handleScheduleFormInputChange('title', e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                placeholder="Descrição do marco"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Status</label>
+              <select
+                value={scheduleForm.status}
+                onChange={(e) => handleScheduleFormInputChange('status', e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+              >
+                {SCHEDULE_STATUS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Líder responsável</label>
+              <select
+                value={scheduleForm.responsibleId}
+                onChange={(e) => handleScheduleFormLeaderSelect(e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">Selecionar líder (opcional)</option>
+                {leaderOptions.map((leader) => (
+                  <option key={leader.id} value={leader.id}>
+                    {leader.name} · {formatRoleLabel(leader.role)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Ou outro responsável</label>
+              <input
+                type="text"
+                value={scheduleForm.responsibleName}
+                onChange={(e) => handleScheduleFormResponsibleNameChange(e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                placeholder="Nome livre"
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleScheduleFormSubmit}
+              className="brand-btn px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-2"
+            >
+              <i className={`fas ${editingScheduleIndex !== null ? 'fa-check-circle' : 'fa-plus'}`}></i>
+              {editingScheduleIndex !== null ? 'Atualizar marco' : 'Adicionar marco'}
+            </button>
+            <button
+              type="button"
+              onClick={resetScheduleForm}
+              className="brand-outline-btn px-4 py-2 text-xs font-bold rounded-xl"
+            >
+              Limpar campos
+            </button>
           </div>
         </div>
         <div className="space-y-3">
@@ -2104,9 +3063,15 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
             campaignConfig.schedule.map((item, idx) => {
               const isElection = item.title.toUpperCase().includes("ELEIÇÃO");
               const statusClass = SCHEDULE_STATUS_BADGE[item.status || 'PLANEJADO'];
+              const responsibleLabel = resolveScheduleResponsible(item);
               return (
-                <div key={idx} className={`flex items-center gap-4 p-4 rounded-xl border transition-all ${isElection ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-slate-50 border-slate-100'}`}>
-                  <div className={`w-12 text-center flex flex-col items-center justify-center p-1 rounded-lg ${isElection ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>
+                <div key={idx} className={`flex flex-col md:flex-row md:items-center gap-4 p-4 rounded-xl border transition-all ${isElection ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-slate-50 border-slate-100'}`}>
+                  <div
+                    className={`w-12 text-center flex flex-col items-center justify-center p-1 rounded-lg ${
+                      isElection ? 'text-white' : 'bg-white border text-slate-600'
+                    }`}
+                    style={isElection ? { backgroundColor: brandPrimary, borderColor: brandPrimary } : undefined}
+                  >
                     <span className="text-[10px] uppercase font-bold opacity-80">{formatScheduleMonth(item.date)}</span>
                     <span className="text-lg font-black leading-none">{formatScheduleDay(item.date)}</span>
                   </div>
@@ -2118,82 +3083,51 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
                         {getScheduleStatusLabel(item.status)}
                       </span>
                     </div>
+                    {responsibleLabel && (
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        Responsável: <span className="font-semibold text-slate-700">{responsibleLabel}</span>
+                      </p>
+                    )}
                   </div>
-                  <i className={`fas ${isElection ? 'fa-star text-indigo-500' : 'fa-check-circle text-slate-300'}`}></i>
+                  <div className="flex items-center gap-2 self-end md:self-auto">
+                    <button
+                      type="button"
+                      onClick={() => handleScheduleEdit(idx)}
+                      className="px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-slate-200 text-slate-600 hover:bg-white"
+                    >
+                      Editar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveScheduleItem(idx)}
+                      className="px-3 py-1.5 text-[11px] font-semibold rounded-lg border border-red-200 text-red-600 hover:bg-red-50"
+                    >
+                      Apagar
+                    </button>
+                  </div>
                 </div>
               );
             })
           )}
         </div>
-        <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-bold text-slate-500 uppercase">Editar Cronograma</p>
-            {scheduleSuccess && <span className="text-[11px] text-emerald-600 font-semibold">{scheduleSuccess}</span>}
-          </div>
+        <div className="pt-4 border-t border-slate-100 space-y-3">
+          {scheduleSuccess && <span className="text-[11px] text-emerald-600 font-semibold">{scheduleSuccess}</span>}
           {scheduleError && (
             <div className="p-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl">{scheduleError}</div>
           )}
-          {campaignConfig.schedule.map((item, idx) => (
-            <div key={`edit-${idx}`} className="grid grid-cols-1 md:grid-cols-5 gap-3">
-              <input
-                type="date"
-                value={item.date}
-                onChange={(e) => handleScheduleFieldChange(idx, 'date', e.target.value)}
-                className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
-              />
-              <input
-                type="text"
-                value={item.title}
-                onChange={(e) => handleScheduleFieldChange(idx, 'title', e.target.value)}
-                className="md:col-span-2 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
-                placeholder="Descrição do marco"
-              />
-              <select
-                value={item.status || 'PLANEJADO'}
-                onChange={(e) => handleScheduleFieldChange(idx, 'status', e.target.value)}
-                className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
-              >
-                {SCHEDULE_STATUS_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={item.responsibleId || ''}
-                  onChange={(e) => handleScheduleFieldChange(idx, 'responsibleId', e.target.value)}
-                  className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
-                  placeholder="Responsável (opcional)"
-                />
-                <button
-                  type="button"
-                  onClick={() => handleRemoveScheduleItem(idx)}
-                  className="p-2 rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-100"
-                >
-                  <i className="fas fa-trash"></i>
-                </button>
-              </div>
-            </div>
-          ))}
           <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleAddScheduleItem}
-              className="px-3 py-2 text-xs font-bold rounded-xl border border-slate-200 hover:bg-slate-100 flex items-center gap-2"
-            >
-              <i className="fas fa-plus text-indigo-500"></i> Adicionar marco
-            </button>
             <button
               type="button"
               onClick={handleSaveChronogram}
               disabled={!scheduleDirty || scheduleSaving}
-              className="px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 flex items-center gap-2"
+              className="brand-btn px-4 py-2 text-xs font-bold rounded-xl disabled:opacity-50 flex items-center gap-2"
             >
               {scheduleSaving ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-save"></i>}
               Salvar Cronograma
             </button>
+            {scheduleDirty && (
+              <span className="text-[11px] font-semibold text-amber-600 uppercase">Rascunho não salvo</span>
+            )}
           </div>
         </div>
       </div>
@@ -2247,6 +3181,31 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
             </div>
           ))}
         </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="p-4 bg-slate-900 text-white rounded-2xl shadow-sm">
+            <p className="text-xs uppercase font-bold text-white/70">Custo diário estimado</p>
+            <p className="text-2xl font-black mt-1">{formatCurrency(financeSummary.totalDaily)}</p>
+            <p className="text-[11px] text-white/50 mt-1">Soma das diárias configuradas</p>
+          </div>
+          <div className="p-4 bg-white rounded-2xl border border-slate-200">
+            <p className="text-xs uppercase font-bold text-slate-500">Sem PIX cadastrado</p>
+            <p className="text-2xl font-black text-slate-900 mt-1">{financeSummary.missingPix}</p>
+            <p className="text-[11px] text-slate-500 mt-1">Precisa para agilizar repasses</p>
+          </div>
+          <div className="p-4 bg-white rounded-2xl border border-slate-200">
+            <p className="text-xs uppercase font-bold text-slate-500">Sem CPF / diária</p>
+            <div className="flex items-baseline gap-6 mt-1">
+              <div>
+                <p className="text-2xl font-black text-slate-900">{financeSummary.missingCpf}</p>
+                <p className="text-[11px] text-slate-500">CPF ausente</p>
+              </div>
+              <div>
+                <p className="text-2xl font-black text-slate-900">{financeSummary.missingDailyRate}</p>
+                <p className="text-[11px] text-slate-500">Sem diária</p>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -2261,20 +3220,22 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
               />
             </div>
             <div className="flex flex-wrap gap-2">
-              {filterOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setFinanceRoleFilter(option.value)}
-                  className={`px-3 py-2 text-xs font-semibold rounded-xl border ${
-                    financeRoleFilter === option.value
-                      ? 'bg-indigo-600 text-white border-indigo-600'
-                      : 'bg-white text-slate-500 border-slate-200'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
+              {filterOptions.map((option) => {
+                const isActive = financeRoleFilter === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setFinanceRoleFilter(option.value)}
+                    className={`px-3 py-2 text-xs font-semibold rounded-xl border ${
+                      isActive ? 'text-white' : 'bg-white text-slate-500 border-slate-200'
+                    }`}
+                    style={isActive ? { backgroundColor: brandPrimary, borderColor: brandPrimary } : undefined}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -2406,6 +3367,367 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     );
   };
 
+  const renderVotersView = () => {
+    const isDirector = user.role === UserRole.DIRECTOR;
+    const canSubmit = Boolean(operation?.id);
+
+    const formFields = (
+      <>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Nome do eleitor *</label>
+            <input
+              type="text"
+              value={voterForm.name}
+              onChange={(e) => handleVoterFormChange('name', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              placeholder="Maria Souza"
+              disabled={!canSubmit || voterSaving}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Telefone *</label>
+            <input
+              type="text"
+              value={voterForm.phone}
+              onChange={(e) => handleVoterFormChange('phone', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              placeholder="(11) 99999-0000"
+              disabled={!canSubmit || voterSaving}
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Cidade</label>
+            <input
+              type="text"
+              value={voterForm.city}
+              onChange={(e) => handleVoterFormChange('city', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              placeholder="Campinas"
+              disabled={!canSubmit || voterSaving}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Bairro</label>
+            <input
+              type="text"
+              value={voterForm.neighborhood}
+              onChange={(e) => handleVoterFormChange('neighborhood', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              placeholder="Jardim São Pedro"
+              disabled={!canSubmit || voterSaving}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Zona Eleitoral</label>
+            <input
+              type="text"
+              value={voterForm.electoralZone}
+              onChange={(e) => handleVoterFormChange('electoralZone', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              placeholder="Zona 245"
+              disabled={!canSubmit || voterSaving}
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Sentimento</label>
+            <select
+              value={voterForm.sentiment}
+              onChange={(e) => handleVoterFormChange('sentiment', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              disabled={!canSubmit || voterSaving}
+            >
+              <option value="">Selecione o sentimento</option>
+              {VOTER_SENTIMENT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Conhece o candidato?</label>
+            <select
+              value={voterForm.knowsCandidate}
+              onChange={(e) => handleVoterFormChange('knowsCandidate', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              disabled={!canSubmit || voterSaving}
+            >
+              {VOTER_BOOL_OPTIONS.map((option) => (
+                <option key={`knows-${option.value}`} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Voto definido?</label>
+            <select
+              value={voterForm.decidedVote}
+              onChange={(e) => handleVoterFormChange('decidedVote', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              disabled={!canSubmit || voterSaving}
+            >
+              {VOTER_BOOL_OPTIONS.map((option) => (
+                <option key={`vote-${option.value}`} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="text-xs font-bold text-slate-500 uppercase">Desejos / Observações</label>
+          <textarea
+            value={voterForm.wishes}
+            onChange={(e) => handleVoterFormChange('wishes', e.target.value)}
+            rows={3}
+            className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+            placeholder="Quais pautas importam para este eleitor?"
+            disabled={!canSubmit || voterSaving}
+          />
+        </div>
+      </>
+    );
+
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h2 className="text-3xl font-black text-slate-900 tracking-tight">Eleitores</h2>
+            <p className="text-slate-500 font-medium">
+              {isDirector
+                ? 'Cadastre e acompanhe todos os eleitores captados na operação.'
+                : 'Registre os eleitores abordados na rua para o comando acompanhar.'}
+            </p>
+          </div>
+          {isDirector && (
+            <div className="flex flex-col items-end gap-2">
+              <div className="text-xs font-bold text-slate-500 uppercase">
+                Operação: {operation?.nome || 'Não configurada'}
+              </div>
+              <button
+                type="button"
+                onClick={() => setVoterFormExpanded((prev) => !prev)}
+                className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                {voterFormExpanded ? 'Recolher registro rápido' : 'Novo eleitor'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {(!isDirector || voterFormExpanded) && (
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase">Registro rápido</p>
+                <p className="text-sm text-slate-500">Preencha os dados do eleitor logo após a conversa.</p>
+              </div>
+              {voterSuccess && <span className="text-sm text-emerald-600 font-semibold">{voterSuccess}</span>}
+            </div>
+            {!canSubmit && (
+              <div className="p-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl">
+                Configure ou selecione uma operação para liberar o cadastro de eleitores.
+              </div>
+            )}
+            {voterFormError && (
+              <div className="p-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl">{voterFormError}</div>
+            )}
+            <form className="space-y-4" onSubmit={handleVoterFormSubmit}>
+              {formFields}
+              <div className="flex items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={!canSubmit || voterSaving}
+                  className="brand-btn px-5 py-3 rounded-2xl font-bold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {voterSaving ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-user-plus"></i>}
+                  Registrar eleitor
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVoterForm(createVoterFormDefaults())}
+                  disabled={voterSaving}
+                  className="px-4 py-3 rounded-2xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Limpar campos
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {isDirector && (
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase">Base de eleitores</p>
+                <p className="text-sm text-slate-500">Extrato completo dos registros desta operação.</p>
+              </div>
+              <span className="text-[11px] font-bold text-slate-500 uppercase">
+                Total: {filteredVoters.length} / {voters.length}
+              </span>
+            </div>
+            {votersError && (
+              <div className="p-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl">{votersError}</div>
+            )}
+            {voters.length > 0 && (
+              <div className="flex flex-wrap gap-4">
+                <div className="flex-1 min-w-[200px]">
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Busca rápida</label>
+                  <input
+                    type="text"
+                    value={voterSearch}
+                    onChange={(e) => setVoterSearch(e.target.value)}
+                    className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                    placeholder="Nome, telefone, cidade..."
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Sentimento</label>
+                  <select
+                    value={voterSentimentFilter}
+                    onChange={(e) => setVoterSentimentFilter(e.target.value)}
+                    className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">Todos</option>
+                    {VOTER_SENTIMENT_OPTIONS.map((option) => (
+                      <option key={`sent-${option.value}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Conhece candidato</label>
+                  <select
+                    value={voterKnowledgeFilter}
+                    onChange={(e) => setVoterKnowledgeFilter(e.target.value)}
+                    className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {VOTER_BOOL_OPTIONS.map((option) => (
+                      <option key={`filter-known-${option.value}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Voto definido</label>
+                  <select
+                    value={voterDecisionFilter}
+                    onChange={(e) => setVoterDecisionFilter(e.target.value)}
+                    className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {VOTER_BOOL_OPTIONS.map((option) => (
+                      <option key={`filter-vote-${option.value}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Ordenação</label>
+                  <select
+                    value={voterSort}
+                    onChange={(e) => setVoterSort(e.target.value as typeof voterSort)}
+                    className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="newest">Mais recentes</option>
+                    <option value="oldest">Mais antigos</option>
+                    <option value="name">Nome A-Z</option>
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={handleExportVoters}
+                    disabled={!filteredVoters.length}
+                    className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    <i className="fas fa-file-export mr-2"></i> Exportar CSV
+                  </button>
+                </div>
+              </div>
+            )}
+            {votersLoading ? (
+              <div className="space-y-3">
+                {[1, 2, 3].map((item) => (
+                  <div key={`voter-loading-${item}`} className="h-16 bg-slate-100 rounded-2xl animate-pulse"></div>
+                ))}
+              </div>
+            ) : voters.length === 0 ? (
+              <p className="text-sm text-slate-500">Nenhum eleitor cadastrado ainda.</p>
+            ) : filteredVoters.length === 0 ? (
+              <p className="text-sm text-slate-500">Nenhum eleitor encontrado para os filtros atuais.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase text-slate-400">
+                      <th className="pb-3">Nome</th>
+                      <th className="pb-3">Contato</th>
+                      <th className="pb-3">Cidade / Bairro</th>
+                      <th className="pb-3">Sentimento</th>
+                      <th className="pb-3">Conhece</th>
+                      <th className="pb-3">Voto</th>
+                      <th className="pb-3">Desejos</th>
+                      <th className="pb-3">Zona</th>
+                      <th className="pb-3">Registrado por</th>
+                      <th className="pb-3">Data</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredVoters.map((record) => {
+                      const sentimentLabel =
+                        VOTER_SENTIMENT_OPTIONS.find((option) => option.value === record.sentiment)?.label || '—';
+                      return (
+                        <tr key={record.id} className="hover:bg-slate-50">
+                          <td className="py-3">
+                            <p className="font-semibold text-slate-800">{record.name}</p>
+                            {record.wishes && (
+                              <p className="text-[11px] text-slate-500 line-clamp-1">{record.wishes}</p>
+                            )}
+                          </td>
+                          <td className="py-3 text-slate-600">{formatPhoneDisplay(record.phone)}</td>
+                          <td className="py-3 text-slate-600">
+                            <div className="text-sm font-semibold">{record.city || '—'}</div>
+                            <div className="text-xs text-slate-500">{record.neighborhood || '—'}</div>
+                          </td>
+                          <td className="py-3 text-slate-600">{sentimentLabel}</td>
+                          <td className="py-3 text-slate-600">{formatBooleanDisplay(record.knowsCandidate)}</td>
+                          <td className="py-3 text-slate-600">{formatBooleanDisplay(record.decidedVote)}</td>
+                          <td className="py-3 text-slate-600 max-w-xs">
+                            <p className="line-clamp-2">{record.wishes || '—'}</p>
+                          </td>
+                          <td className="py-3 text-slate-600">{record.electoralZone || '—'}</td>
+                          <td className="py-3 text-slate-600 text-sm">{record.recordedByName || 'Equipe'}</td>
+                          <td className="py-3 text-slate-500 text-xs">
+                            {new Date(record.createdAt).toLocaleString('pt-BR', {
+                              day: '2-digit',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderSettingsView = () => (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -2435,6 +3757,41 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
           )}
           {renderDirectorLeaderInvitesCard()}
           {renderDirectorSoldierInvitesCard()}
+          {inviteConsumptionFeed.length > 0 && (
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <i className="fas fa-bell text-emerald-500"></i> Convites utilizados recentemente
+                </h3>
+                <span className="text-[11px] font-black text-slate-400 uppercase">
+                  Últimos {inviteConsumptionFeed.length}
+                </span>
+              </div>
+              <div className="space-y-3">
+                {inviteConsumptionFeed.map((invite) => {
+                  const consumerName = invite.consumido_por ? membersMap[invite.consumido_por]?.name : null;
+                  return (
+                    <div
+                      key={`usage-${invite.id}`}
+                      className="p-3 rounded-xl border border-slate-100 bg-slate-50 flex flex-col md:flex-row md:items-center md:justify-between gap-2"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800">
+                          {consumerName || 'Novo membro'}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          {invite.tipo === 'LEADER' ? 'Convite de líder' : 'Convite de soldado'} · Token {invite.token.slice(0, 6)}...
+                        </p>
+                      </div>
+                      <span className="text-[11px] font-bold text-slate-500 uppercase">
+                        {formatDateTimeLabel(invite.consumido_em)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
       {isLeaderRole && renderLeaderManagement()}
@@ -2535,6 +3892,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
         return renderFinanceView();
       case 'TEAM':
         return renderTeamView();
+      case 'VOTERS':
+        return renderVotersView();
       default:
         return renderCommandView();
     }

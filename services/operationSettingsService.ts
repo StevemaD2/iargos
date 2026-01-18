@@ -12,6 +12,8 @@ import {
 const HIERARCHY_TABLE = 'hierarquia_notas';
 const TIMELINE_TABLE = 'cronogramas_operacao';
 const MISSING_RECIPIENTS_CODE = 'MISSING_DEST_COLUMN';
+export const MISSING_TIMELINE_RESPONSIBLE_COLUMN = 'MISSING_TIMELINE_RESPONSIBLE_COLUMN';
+const TIMELINE_RESPONSIBLE_COLUMN = 'responsavel_nome';
 
 type RawHierarchyNote = {
   id: string;
@@ -29,6 +31,7 @@ type RawTimelineEntry = {
   data: string;
   status: CampaignScheduleStatus | null;
   responsavel_id?: string | null;
+  responsavel_nome?: string | null;
   versao: number;
   created_at?: string;
 };
@@ -73,7 +76,8 @@ const toTimelineEntry = (row: RawTimelineEntry): CampaignScheduleItem => ({
   date: row.data,
   title: row.titulo,
   status: row.status || 'PLANEJADO',
-  responsibleId: row.responsavel_id || null
+  responsibleId: row.responsavel_id || null,
+  responsibleName: row.responsavel_nome || null
 });
 
 export const fetchHierarchyNotes = async (
@@ -179,33 +183,65 @@ export const deleteHierarchyNote = async (noteId: string) => {
   if (error) throw error;
 };
 
+const isMissingTimelineResponsibleColumn = (error: any) => {
+  const message = (error?.message || '').toString().toLowerCase();
+  return (
+    error?.code === '42703' ||
+    error?.code === 'PGRST204' ||
+    message.includes(TIMELINE_RESPONSIBLE_COLUMN)
+  );
+};
+
 export const fetchOperationTimeline = async (
   operationId: string
-): Promise<{ version: number; entries: CampaignScheduleItem[] }> => {
+): Promise<{ version: number; entries: CampaignScheduleItem[]; supportsResponsibleName: boolean }> => {
   if (!supabase) throw new Error('Supabase não configurado.');
 
-  const { data, error } = await supabase
-    .from(TIMELINE_TABLE)
-    .select('id, titulo, data, status, responsavel_id, versao, created_at')
-    .eq('operacao_id', operationId)
-    .order('versao', { ascending: false })
-    .order('data', { ascending: true });
+  const selectFields = (includeResponsibleName: boolean) =>
+    includeResponsibleName
+      ? 'id, titulo, data, status, responsavel_id, responsavel_nome, versao, created_at'
+      : 'id, titulo, data, status, responsavel_id, versao, created_at';
 
-  if (error) throw error;
-  if (!data || data.length === 0) return { version: 0, entries: [] };
+  const runQuery = async (includeResponsibleName: boolean) =>
+    supabase
+      .from(TIMELINE_TABLE)
+      .select(selectFields(includeResponsibleName))
+      .eq('operacao_id', operationId)
+      .order('versao', { ascending: false })
+      .order('data', { ascending: true });
+
+  const { data, error } = await runQuery(true);
+  if (error) {
+    const missingColumn = isMissingTimelineResponsibleColumn(error);
+    if (!missingColumn) throw error;
+    const fallback = await runQuery(false);
+    if (fallback.error) throw fallback.error;
+    const fallbackRows = (fallback.data || []) as RawTimelineEntry[];
+    if (!fallbackRows.length) {
+      return { version: 0, entries: [], supportsResponsibleName: false };
+    }
+    const latestVersion = fallbackRows[0]?.versao || 1;
+    return {
+      version: latestVersion,
+      entries: fallbackRows.filter((row) => row.versao === latestVersion).map(toTimelineEntry),
+      supportsResponsibleName: false
+    };
+  }
+
+  if (!data || data.length === 0) return { version: 0, entries: [], supportsResponsibleName: true };
 
   const rows = data as RawTimelineEntry[];
   const latestVersion = rows[0]?.versao || 1;
   return {
     version: latestVersion,
-    entries: rows.filter((row) => row.versao === latestVersion).map(toTimelineEntry)
+    entries: rows.filter((row) => row.versao === latestVersion).map(toTimelineEntry),
+    supportsResponsibleName: true
   };
 };
 
 export const saveOperationTimeline = async (
   operationId: string,
-  entries: CampaignScheduleItem[],
-  userId?: string
+  entries: CampaignScheduleItem[]
 ): Promise<{ version: number; entries: CampaignScheduleItem[] }> => {
   if (!supabase) throw new Error('Supabase não configurado.');
   if (!entries.length) throw new Error('Informe ao menos um marco.');
@@ -219,21 +255,36 @@ export const saveOperationTimeline = async (
     .maybeSingle();
 
   const nextVersion = (latest?.versao || 0) + 1;
-  const payload = entries.map((entry) => ({
-    operacao_id: operationId,
-    titulo: entry.title,
-    data: entry.date,
-    status: entry.status || 'PLANEJADO',
-    responsavel_id: entry.responsibleId || userId || null,
-    versao: nextVersion
-  }));
+  const hasCustomResponsible = entries.some((entry) => (entry.responsibleName || '').trim().length > 0);
+  const payload = entries.map((entry) => {
+    const body: Record<string, any> = {
+      operacao_id: operationId,
+      titulo: entry.title,
+      data: entry.date,
+      status: entry.status || 'PLANEJADO',
+      responsavel_id: entry.responsibleId || null,
+      versao: nextVersion
+    };
+    if (hasCustomResponsible) {
+      body[TIMELINE_RESPONSIBLE_COLUMN] = entry.responsibleName?.trim() || null;
+    }
+    return body;
+  });
 
-  const { data, error } = await supabase
-    .from(TIMELINE_TABLE)
-    .insert(payload)
-    .select('id, titulo, data, status, responsavel_id, versao, created_at');
+  const selectFields = hasCustomResponsible
+    ? 'id, titulo, data, status, responsavel_id, responsavel_nome, versao, created_at'
+    : 'id, titulo, data, status, responsavel_id, versao, created_at';
 
-  if (error || !data) throw error || new Error('Falha ao salvar cronograma.');
+  const { data, error } = await supabase.from(TIMELINE_TABLE).insert(payload).select(selectFields);
+
+  if (error || !data) {
+    if (hasCustomResponsible && isMissingTimelineResponsibleColumn(error)) {
+      const err = new Error('Adicione a coluna responsavel_nome (text) em cronogramas_operacao.');
+      (err as any).code = MISSING_TIMELINE_RESPONSIBLE_COLUMN;
+      throw err;
+    }
+    throw error || new Error('Falha ao salvar cronograma.');
+  }
 
   const rows = data as RawTimelineEntry[];
   return { version: nextVersion, entries: rows.map(toTimelineEntry) };

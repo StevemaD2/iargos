@@ -1,0 +1,30 @@
+:root {
+  --iargos-brand-primary: #4338ca;
+  --iargos-brand-secondary: #0f172a;
+}
+
+body {
+  background-color: var(--iargos-brand-secondary);
+  color: #0f172a;
+}
+
+.brand-btn {
+  background-color: var(--iargos-brand-primary);
+  color: #fff;
+  transition: opacity 0.2s ease;
+}
+
+.brand-btn:hover {
+  opacity: 0.9;
+}
+
+.brand-outline-btn {
+  border: 1px solid var(--iargos-brand-primary);
+  color: var(--iargos-brand-primary);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.brand-outline-btn:hover {
+  background-color: var(--iargos-brand-primary);
+  color: #fff;
+}

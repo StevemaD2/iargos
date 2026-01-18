@@ -189,7 +189,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
     }
 
     const locationPromise = captureGeoSnapshot();
-    const locationPromise = captureGeoSnapshot();
     setConnectLoading(true);
     setStatus(null);
     try {
@@ -302,13 +301,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
         console.warn('Falha ao registrar ponto de entrada', timesheetError);
       }
 
-      const loginLocation = await locationPromise;
-      try {
-        await recordMemberTimesheetEvent(member.id, 'LOGIN', loginLocation);
-      } catch (timesheetError) {
-        console.warn('Falha ao registrar ponto de entrada', timesheetError);
-      }
-
       onLogin({
         id: member.id,
         name: member.nome,
@@ -348,6 +340,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       return;
     }
 
+    const locationPromise = captureGeoSnapshot();
     setConnectLoading(true);
     setStatus(null);
     try {
@@ -388,6 +381,13 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       else if (normalizedRole.includes('LIDER_N2') || normalizedRole === 'L2') resolvedRole = UserRole.L2;
       else if (normalizedRole.includes('LIDER_N3') || normalizedRole === 'L3' || normalizedRole === 'LEADER')
         resolvedRole = UserRole.L3;
+
+      const loginLocation = await locationPromise;
+      try {
+        await recordMemberTimesheetEvent(member.id, 'LOGIN', loginLocation);
+      } catch (timesheetError) {
+        console.warn('Falha ao registrar ponto de entrada', timesheetError);
+      }
 
       onLogin({
         id: member.id,

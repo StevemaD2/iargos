@@ -1,11 +1,10 @@
 
 import React, { useState, useEffect } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { User, UserRole, Submission } from './types';
+import { User, UserRole } from './types';
 import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import SubmissionForm from './components/SubmissionForm';
-import QRScanner from './components/QRScanner';
 import LeaderFeed from './components/LeaderFeed';
 import Sidebar from './components/Sidebar';
 import { requestCurrentLocation } from './services/locationService';
@@ -70,9 +69,9 @@ const App: React.FC = () => {
                 <Route path="/configuracoes" element={<Dashboard user={user} view="SETTINGS" />} />
                 <Route path="/financeiro" element={<Dashboard user={user} view="FINANCE" />} />
                 <Route path="/team" element={<Dashboard user={user} view="TEAM" />} />
+                <Route path="/minha-equipe" element={<Dashboard user={user} view="LEADER_TEAM" />} />
                 <Route path="/eleitores" element={<Dashboard user={user} view="VOTERS" />} />
                 <Route path="/report" element={<SubmissionForm user={user} />} />
-                <Route path="/onboard" element={<QRScanner user={user} />} />
                 <Route path="/feed" element={<LeaderFeed user={user} />} />
                 <Route path="*" element={<Navigate to="/" />} />
               </>

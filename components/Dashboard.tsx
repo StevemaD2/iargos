@@ -39,7 +39,7 @@ import {
   TimesheetData
 } from '../services/memberActivityService';
 
-type DashboardView = 'COMMAND' | 'TEAM' | 'STRUCTURE' | 'CRONOGRAMA' | 'SETTINGS' | 'FINANCE' | 'VOTERS';
+type DashboardView = 'COMMAND' | 'TEAM' | 'STRUCTURE' | 'CRONOGRAMA' | 'SETTINGS' | 'FINANCE' | 'VOTERS' | 'LEADER_TEAM';
 type FinanceRoleFilter = 'ALL' | UserRole;
 
 interface DashboardProps {
@@ -738,12 +738,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   }, [operation?.id]);
 
   const loadVoters = useCallback(async () => {
-    if (user.role !== UserRole.DIRECTOR) {
-      setVoters([]);
-      setVotersError(null);
-      return;
-    }
-    if (!operation?.id) {
+    const canView = user.role === UserRole.DIRECTOR || isLeaderRole;
+    if (!canView || !operation?.id) {
       setVoters([]);
       setVotersError(null);
       return;
@@ -759,7 +755,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     } finally {
       setVotersLoading(false);
     }
-  }, [operation?.id, user.role]);
+  }, [operation?.id, user.role, isLeaderRole]);
 
   useEffect(() => {
     loadVoters();
@@ -817,6 +813,37 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     voterDecisionFilter,
     voterSort
   ]);
+
+  const myTeamMemberIds = useMemo(() => {
+    if (!isLeaderRole) return new Set<string>();
+    const team = new Set<string>([user.id]);
+    let updated = true;
+    while (updated) {
+      updated = false;
+      members.forEach((member) => {
+        if (member.leaderId && team.has(member.leaderId) && !team.has(member.id)) {
+          team.add(member.id);
+          updated = true;
+        }
+      });
+    }
+    return team;
+  }, [isLeaderRole, members, user.id]);
+
+  const myDirectReports = useMemo(
+    () => (isLeaderRole ? members.filter((member) => member.leaderId === user.id) : []),
+    [members, user.id, isLeaderRole]
+  );
+
+  const myTeamMembers = useMemo(
+    () => (isLeaderRole ? members.filter((member) => myTeamMemberIds.has(member.id) && member.id !== user.id) : []),
+    [members, myTeamMemberIds, isLeaderRole, user.id]
+  );
+
+  const teamVoters = useMemo(() => {
+    if (!isLeaderRole) return [];
+    return voters.filter((record) => record.recordedById && myTeamMemberIds.has(record.recordedById));
+  }, [voters, isLeaderRole, myTeamMemberIds]);
 
   const handleExportVoters = () => {
     if (!filteredVoters.length) return;
@@ -932,7 +959,7 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
       const record = await createOperationVoter(operation.id, payload, recordedById);
       setVoterSuccess('Eleitor registrado com sucesso.');
       setVoterForm(createVoterFormDefaults());
-      setVoters((prev) => (user.role === UserRole.DIRECTOR ? [record, ...prev] : prev));
+      setVoters((prev) => ((user.role === UserRole.DIRECTOR || isLeaderRole) ? [record, ...prev] : prev));
   } catch (error) {
     console.error('Voter save error', error);
     setVoterFormError('Não foi possível salvar o eleitor agora.');
@@ -3798,6 +3825,120 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
     </div>
   );
 
+  const renderLeaderTeamView = () => {
+    if (!isLeaderRole) {
+      return (
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 text-sm text-slate-600">
+          Esta área é exclusiva para líderes da operação.
+        </div>
+      );
+    }
+
+    const now = Date.now();
+    const recentVoters = [...teamVoters].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5);
+    const voters24h = teamVoters.filter(
+      (record) => new Date(record.createdAt).getTime() > now - 24 * 60 * 60 * 1000
+    ).length;
+
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold text-slate-500 uppercase">Minha equipe</p>
+            <h2 className="text-3xl font-black text-slate-900 tracking-tight">Status operacional</h2>
+            <p className="text-slate-500 font-medium">
+              Acompanhe seus subordinados diretos e os resultados recentes de campo.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="p-3 bg-white rounded-xl border border-slate-200">
+              <p className="text-[11px] font-bold text-slate-500 uppercase">Diretos</p>
+              <p className="text-2xl font-black text-slate-900">{myDirectReports.length}</p>
+            </div>
+            <div className="p-3 bg-white rounded-xl border border-slate-200">
+              <p className="text-[11px] font-bold text-slate-500 uppercase">Equipe total</p>
+              <p className="text-2xl font-black text-slate-900">{myTeamMembers.length}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-200 p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                <i className="fas fa-users text-indigo-500"></i> Equipe direta
+              </h3>
+            </div>
+            {myDirectReports.length === 0 ? (
+              <p className="text-sm text-slate-500">Nenhum subordinado direto cadastrado para você ainda.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-xs uppercase text-slate-400">
+                      <th className="pb-2 text-left">Nome</th>
+                      <th className="pb-2 text-left">Contato</th>
+                      <th className="pb-2 text-left">Função</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {myDirectReports.map((member) => (
+                      <tr key={`direct-${member.id}`} className="hover:bg-slate-50">
+                        <td className="py-3">
+                          <p className="font-semibold text-slate-800">{member.name}</p>
+                        </td>
+                        <td className="py-3 text-slate-600">{formatPhoneDisplay(member.phone)}</td>
+                        <td className="py-3 text-slate-500 text-xs">{formatRoleLabel(member.role)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                <i className="fas fa-person-booth text-indigo-500"></i> Eleitores captados
+              </h3>
+              <div className="text-[11px] font-black text-slate-500 uppercase">
+                <span className="mr-3">Equipe: {teamVoters.length}</span>
+                <span>24h: {voters24h}</span>
+              </div>
+            </div>
+            {teamVoters.length === 0 ? (
+              <p className="text-sm text-slate-500">Ainda não há registros de eleitores pela sua equipe.</p>
+            ) : (
+              <div className="space-y-3">
+                {recentVoters.map((record) => (
+                  <div
+                    key={`team-voter-${record.id}`}
+                    className="p-3 rounded-xl border border-slate-100 bg-slate-50 flex flex-col gap-1"
+                  >
+                    <div className="flex items-center justify-between text-sm font-semibold text-slate-800">
+                      <span>{record.name}</span>
+                      <span className="text-[11px] text-slate-500">{formatDateTimeLabel(record.createdAt)}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      {record.city || '--'} · {record.neighborhood || '--'}
+                    </p>
+                    <p className="text-[11px] text-slate-500 uppercase">
+                      Registrado por{' '}
+                      {record.recordedById === user.id
+                        ? 'você'
+                        : membersMap[record.recordedById || '']?.name || 'Equipe'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderTimesheetModal = () => {
     if (!timesheetModal.open || !timesheetModal.member) return null;
     const days = [...(timesheetModal.data.days || [])].sort((a, b) => b.date.localeCompare(a.date));
@@ -3892,6 +4033,8 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
         return renderFinanceView();
       case 'TEAM':
         return renderTeamView();
+      case 'LEADER_TEAM':
+        return renderLeaderTeamView();
       case 'VOTERS':
         return renderVotersView();
       default:

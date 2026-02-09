@@ -17,6 +17,7 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('iargos_user');
     return saved ? JSON.parse(saved) : null;
   });
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   const handleLogin = (newUser: User) => {
     setUser(newUser);
@@ -87,7 +88,7 @@ const App: React.FC = () => {
     const location = useLocation();
     const isChat = location.pathname === '/chat';
     return (
-      <main className={`h-full min-h-0 bg-slate-50 ${isChat ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <main className={`flex-1 min-h-0 bg-slate-50 ${isChat ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         <Routes>
           <Route path="/santinho/:slug" element={<CandidateShare />} />
           {!user ? (
@@ -120,9 +121,34 @@ const App: React.FC = () => {
 
   return (
     <Router>
-      <div className="flex h-screen" style={{ backgroundColor: 'var(--iargos-brand-secondary)' }}>
-        {user && <Sidebar user={user} onLogout={handleLogout} />}
-        <div className="flex-1 min-h-0">
+      <div className="flex h-screen min-h-[100dvh]" style={{ backgroundColor: 'var(--iargos-brand-secondary)' }}>
+        {user && (
+          <Sidebar
+            user={user}
+            onLogout={handleLogout}
+            mobileOpen={isMobileNavOpen}
+            onClose={() => setIsMobileNavOpen(false)}
+          />
+        )}
+        <div className="flex-1 min-h-0 flex flex-col">
+          {user && (
+            <header className="md:hidden flex items-center justify-between px-4 py-3 bg-slate-900 text-white border-b border-slate-800">
+              <button
+                onClick={() => setIsMobileNavOpen(true)}
+                className="w-10 h-10 rounded-lg bg-slate-800/70 flex items-center justify-center"
+                aria-label="Abrir menu"
+              >
+                <i className="fas fa-bars"></i>
+              </button>
+              <div className="text-center">
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400">IARGOS</p>
+                <p className="text-[11px] font-semibold text-slate-200">{user.role.replace('_', ' ')}</p>
+              </div>
+              <div className="w-10 h-10 rounded-lg bg-slate-800/70 flex items-center justify-center font-bold">
+                {user.name.charAt(0)}
+              </div>
+            </header>
+          )}
           <MainContent />
         </div>
       </div>

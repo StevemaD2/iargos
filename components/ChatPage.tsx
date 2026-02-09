@@ -66,6 +66,7 @@ const ChatPage: React.FC<{ user: User }> = ({ user }) => {
   const [searchLoading, setSearchLoading] = useState(false);
   const [directTarget, setDirectTarget] = useState('');
   const [creatingDirect, setCreatingDirect] = useState(false);
+  const [mobileView, setMobileView] = useState<'list' | 'chat'>('list');
   const isDirector = user.role === UserRole.DIRECTOR;
 
   const memberMap = useMemo(() => {
@@ -174,6 +175,14 @@ const ChatPage: React.FC<{ user: User }> = ({ user }) => {
   useEffect(() => {
     loadMessages();
   }, [loadMessages]);
+
+  useEffect(() => {
+    if (!selectedChat) {
+      setMobileView('list');
+    } else {
+      setMobileView('chat');
+    }
+  }, [selectedChat]);
 
   useEffect(() => {
     if (!selectedChat) return;
@@ -295,9 +304,13 @@ const ChatPage: React.FC<{ user: User }> = ({ user }) => {
   }, [chats, isDirector]);
 
   return (
-    <div className="p-6 h-full min-h-0 overflow-hidden">
-      <div className="flex flex-col lg:flex-row gap-6 h-full min-h-0 overflow-hidden">
-        <div className="w-full lg:w-80 bg-white border border-slate-200 rounded-2xl p-4 h-full min-h-0 flex flex-col overflow-hidden">
+    <div className="p-4 lg:p-6 h-full min-h-0 overflow-hidden">
+      <div className="flex flex-col lg:flex-row gap-4 lg:gap-6 h-full min-h-0 overflow-hidden">
+        <div
+          className={`w-full lg:w-80 bg-white border border-slate-200 rounded-2xl p-4 min-h-0 flex flex-col overflow-hidden ${
+            mobileView === 'list' ? 'flex' : 'hidden'
+          } lg:flex`}
+        >
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-black text-slate-900">Chats</h2>
             <button
@@ -383,6 +396,7 @@ const ChatPage: React.FC<{ user: User }> = ({ user }) => {
                     onClick={() => {
                       setSelectedChat(chat);
                       setTab('live');
+                      setMobileView('chat');
                     }}
                     className={`w-full text-left border rounded-xl p-3 transition ${
                       selectedChat?.id === chat.id
@@ -410,6 +424,7 @@ const ChatPage: React.FC<{ user: User }> = ({ user }) => {
                         onClick={() => {
                           setSelectedChat(chat);
                           setTab('live');
+                          setMobileView('chat');
                         }}
                         className={`w-full text-left border rounded-xl p-3 transition ${
                           selectedChat?.id === chat.id
@@ -436,7 +451,20 @@ const ChatPage: React.FC<{ user: User }> = ({ user }) => {
           </div>
         </div>
 
-        <div className="flex-1 bg-white border border-slate-200 rounded-2xl p-6 h-full min-h-0 flex flex-col overflow-hidden">
+        <div
+          className={`flex-1 bg-white border border-slate-200 rounded-2xl p-4 lg:p-6 min-h-0 flex flex-col overflow-hidden ${
+            mobileView === 'chat' ? 'flex' : 'hidden'
+          } lg:flex`}
+        >
+          <div className="flex items-center gap-3 mb-4 lg:hidden">
+            <button
+              onClick={() => setMobileView('list')}
+              className="text-xs px-3 py-2 rounded-lg bg-slate-100 text-slate-700 font-bold"
+            >
+              Voltar
+            </button>
+            <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Conversas</p>
+          </div>
           {error && (
             <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
               {error}

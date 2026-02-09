@@ -6,9 +6,11 @@ import { User, UserRole } from '../types';
 interface SidebarProps {
   user: User;
   onLogout: () => void;
+  mobileOpen?: boolean;
+  onClose?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ user, onLogout }) => {
+const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, onClose }) => {
   const location = useLocation();
 
   const navItems = [
@@ -39,16 +41,30 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout }) => {
 
   const { days, weeks } = getCountdown();
 
-  return (
-    <div className="w-64 bg-slate-900 text-white flex flex-col hidden md:flex shrink-0 border-r border-slate-800">
+  const sidebarBody = (
+    <>
       <div className="p-6 border-b border-slate-800">
-        <h1 className="text-xl font-black tracking-tight flex items-center gap-2 text-indigo-400">
-          <i className="fas fa-shield-halved"></i> IARGOS
-        </h1>
-        <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest font-bold">{user.role.replace('_', ' ')}</p>
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h1 className="text-xl font-black tracking-tight flex items-center gap-2 text-indigo-400">
+              <i className="fas fa-shield-halved"></i> IARGOS
+            </h1>
+            <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest font-bold">
+              {user.role.replace('_', ' ')}
+            </p>
+          </div>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="md:hidden w-9 h-9 rounded-lg bg-slate-800/70 flex items-center justify-center text-slate-200"
+              aria-label="Fechar menu"
+            >
+              <i className="fas fa-xmark"></i>
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Countdown Widget */}
       <div className="mx-4 mt-6 p-4 rounded-xl bg-indigo-600/10 border border-indigo-500/20">
         <div className="flex items-center gap-2 text-indigo-400 text-[10px] font-bold uppercase tracking-widest mb-2">
           <i className="fas fa-calendar-check"></i> Contagem Regressiva
@@ -60,15 +76,16 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout }) => {
           ({weeks} semanas para a urna)
         </div>
       </div>
-      
+
       <nav className="flex-1 p-4 space-y-1 mt-4">
         {filteredItems.map(item => (
           <Link
             key={item.path}
             to={item.path}
+            onClick={onClose}
             className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 group ${
-              location.pathname === item.path 
-                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' 
+              location.pathname === item.path
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20'
                 : 'text-slate-400 hover:bg-slate-800 hover:text-white'
             }`}
           >
@@ -96,7 +113,23 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout }) => {
           <span>Encerrar Operação</span>
         </button>
       </div>
-    </div>
+    </>
+  );
+
+  return (
+    <>
+      <div className="w-64 bg-slate-900 text-white flex flex-col hidden md:flex shrink-0 border-r border-slate-800">
+        {sidebarBody}
+      </div>
+      {mobileOpen && (
+        <div className="md:hidden fixed inset-0 z-40">
+          <div className="absolute inset-0 bg-black/50" onClick={onClose}></div>
+          <div className="absolute left-0 top-0 h-full w-72 bg-slate-900 text-white flex flex-col border-r border-slate-800">
+            {sidebarBody}
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 

@@ -5,6 +5,7 @@ import type { Feature, GeoJsonObject, Geometry, GeometryCollection, MultiPolygon
 import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import { supabase } from '../services/supabaseClient';
+import { UserRole } from '../types';
 
 interface Zone {
   id: string;
@@ -18,6 +19,14 @@ interface Member {
   id: string;
   nome: string;
 }
+
+type MemberLocationPin = {
+  id: string;
+  name: string;
+  role?: string | null;
+  location: { lat: number; lng: number };
+  updatedAt: string;
+};
 
 interface Subzone {
   id: string;
@@ -54,6 +63,7 @@ interface ZonePlannerProps {
   operationId?: string;
   stateCenter?: { lat: number; lng: number; zoom: number };
   readOnly?: boolean;
+  viewer?: { id: string; role: UserRole };
 }
 
 const defaultCenter = { lat: -14.235, lng: -51.9253, zoom: 4 };
@@ -136,7 +146,7 @@ const emptyActionForm: ActionFormState = {
   responsavel_id: ''
 };
 
-const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, readOnly }) => {
+const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, readOnly, viewer }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const drawRef = useRef<MapboxDraw | null>(null);
@@ -172,6 +182,8 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
   const [editActionSaving, setEditActionSaving] = useState<Record<string, boolean>>({});
   const [zoneDeleting, setZoneDeleting] = useState<Record<string, boolean>>({});
   const [subzoneDeleting, setSubzoneDeleting] = useState<Record<string, boolean>>({});
+  const [memberPins, setMemberPins] = useState<MemberLocationPin[]>([]);
+  const memberMarkersRef = useRef<Map<string, mapboxgl.Marker>>(new Map());
   const canEdit = !readOnly;
   const pendingZoneTarget = pendingTargetZoneId
     ? zones.find((zone) => zone.id === pendingTargetZoneId) || null
@@ -272,6 +284,55 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
   }, [operationId]);
 
   useEffect(() => {
+    let timer: number | null = null;
+
+    const fetchMemberLocations = async () => {
+      if (!supabase || !operationId || !viewer || viewer.role === UserRole.SOLDIER) {
+        setMemberPins([]);
+        return;
+      }
+
+      let query = supabase
+        .from('membros')
+        .select('id, nome, tipo, last_location, last_location_at, responsavel_id')
+        .eq('operacao_id', operationId);
+
+      if (viewer.role !== UserRole.DIRECTOR) {
+        query = query.eq('responsavel_id', viewer.id).eq('tipo', 'SOLDIER');
+      }
+
+      const { data, error: membersError } = await query;
+
+      if (membersError) {
+        console.error('Erro ao carregar localização dos membros', membersError);
+        return;
+      }
+
+      const pins: MemberLocationPin[] = [];
+      (data || []).forEach((member: any) => {
+        const loc = member.last_location;
+        if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return;
+        const updatedAt = member.last_location_at || new Date().toISOString();
+        pins.push({
+          id: member.id,
+          name: member.nome || 'Colaborador',
+          role: member.tipo || null,
+          location: { lat: loc.lat, lng: loc.lng },
+          updatedAt
+        });
+      });
+      setMemberPins(pins);
+    };
+
+    fetchMemberLocations();
+    timer = window.setInterval(fetchMemberLocations, 60_000);
+
+    return () => {
+      if (timer) window.clearInterval(timer);
+    };
+  }, [operationId, viewer]);
+
+  useEffect(() => {
     const fetchAssignments = async () => {
       if (!supabase || !operationId || zones.length === 0) {
         setZoneLeaders({});
@@ -356,6 +417,45 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
     };
     fetchActions();
   }, [zones, zoneSubzones]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const markers = memberMarkersRef.current;
+    const nextIds = new Set(memberPins.map((pin) => pin.id));
+
+    markers.forEach((marker, id) => {
+      if (!nextIds.has(id)) {
+        marker.remove();
+        markers.delete(id);
+      }
+    });
+
+    memberPins.forEach((pin) => {
+      const existing = markers.get(pin.id);
+      const lngLat: [number, number] = [pin.location.lng, pin.location.lat];
+
+      if (existing) {
+        existing.setLngLat(lngLat);
+        return;
+      }
+
+      const color = pin.role === 'LEADER' ? '#f97316' : '#22c55e';
+      const marker = new mapboxgl.Marker({ color })
+        .setLngLat(lngLat)
+        .setPopup(
+          new mapboxgl.Popup({ offset: 18 }).setHTML(
+            `<div style="font-size:12px;">
+              <strong>${pin.name}</strong><br />
+              Última atualização: ${new Date(pin.updatedAt).toLocaleString('pt-BR')}
+            </div>`
+          )
+        )
+        .addTo(map);
+      markers.set(pin.id, marker);
+    });
+  }, [memberPins, mapReady]);
 
   const handleDrawCreate = useCallback(
     (event: any) => {

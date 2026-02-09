@@ -93,3 +93,29 @@ export const updateMemberDailyRate = async (memberId: string, value: number | nu
   const { error } = await supabase.from('membros').update({ valordiaria: value }).eq('id', memberId);
   if (error) throw error;
 };
+
+export const updateMemberLastLocation = async (
+  memberId: string,
+  location: GeoPoint | null,
+  timestamp?: string
+) => {
+  if (!memberId || !supabase || !location) return;
+  const resolvedTimestamp = timestamp || new Date().toISOString();
+  const payload = {
+    last_location: {
+      lat: location.lat,
+      lng: location.lng,
+      accuracy: (location as any).accuracy
+    },
+    last_location_at: resolvedTimestamp
+  };
+  const { error } = await supabase.from('membros').update(payload).eq('id', memberId);
+  if (error) throw error;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem('iargos_last_location_ping', resolvedTimestamp);
+    } catch {
+      // ignore storage failures
+    }
+  }
+};

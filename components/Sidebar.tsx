@@ -19,6 +19,7 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout }) => {
     { path: '/estrutura', label: 'Estrutura e Avisos', icon: 'fa-sitemap', roles: [UserRole.DIRECTOR] },
     { path: '/cronograma', label: 'Cronograma', icon: 'fa-calendar-alt', roles: [UserRole.DIRECTOR] },
     { path: '/financeiro', label: 'Controle e Financeiro', icon: 'fa-coins', roles: [UserRole.DIRECTOR] },
+    { path: '/chat', label: 'Chat', icon: 'fa-comments', roles: [UserRole.SOLDIER, UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] },
     { path: '/eleitores', label: 'Eleitores', icon: 'fa-person-booth', roles: [UserRole.SOLDIER, UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] },
     { path: '/configuracoes', label: 'Configurações', icon: 'fa-sliders', roles: [UserRole.DIRECTOR] },
     { path: '/report', label: 'Registros', icon: 'fa-file-waveform', roles: [UserRole.SOLDIER, UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] }

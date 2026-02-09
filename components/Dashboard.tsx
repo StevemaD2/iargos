@@ -14,9 +14,9 @@ import {
   GeoPoint,
   VoterRecord
 } from '../types';
-import { analyzeSubmissions } from '../services/geminiService';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { supabase } from '../services/supabaseClient';
+import { requestCurrentLocation } from '../services/locationService';
 import ZonePlanner from './ZonePlanner';
 import SantinhoCard from './SantinhoCard';
 import { fetchOperationVoters, createOperationVoter } from '../services/votersService';
@@ -36,6 +36,7 @@ import { STATE_METADATA } from '../constants/states';
 import {
   updateMemberDailyRate,
   normalizeTimesheet,
+  updateMemberLastLocation,
   TimesheetData
 } from '../services/memberActivityService';
 
@@ -326,8 +327,6 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   const isLeaderRole = [UserRole.L1, UserRole.L2, UserRole.L3].includes(user.role);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [submissionsLoading, setSubmissionsLoading] = useState(false);
-  const [aiInsight, setAiInsight] = useState<any>(null);
-  const [aiLoading, setAiLoading] = useState(false);
   const initialConfigKey = buildCampaignConfigKey(user.operationId, user.id);
   const [campaignConfig, setCampaignConfig] = useState<CampaignConfig>(() => {
     const stored = readCampaignConfigFromStorage(initialConfigKey);
@@ -943,6 +942,7 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
   setVoterFormError(null);
   setVoterSuccess(null);
   try {
+    const locationSnapshot = user.role === UserRole.DIRECTOR ? null : await requestCurrentLocation().catch(() => null);
     const payload = {
       name: trimmedName,
       phone: trimmedPhone,
@@ -957,6 +957,9 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
     };
       const recordedById = user.role === UserRole.DIRECTOR ? undefined : user.id;
       const record = await createOperationVoter(operation.id, payload, recordedById);
+      if (recordedById && locationSnapshot) {
+        await updateMemberLastLocation(recordedById, locationSnapshot, new Date().toISOString());
+      }
       setVoterSuccess('Eleitor registrado com sucesso.');
       setVoterForm(createVoterFormDefaults());
       setVoters((prev) => ((user.role === UserRole.DIRECTOR || isLeaderRole) ? [record, ...prev] : prev));
@@ -1779,26 +1782,16 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
     const loadSubmissions = async () => {
       if (!operation?.id) {
         setSubmissions([]);
-        setAiInsight(null);
         return;
       }
       setSubmissionsLoading(true);
       try {
         const data = await fetchOperationSubmissions(operation.id);
         setSubmissions(data);
-        if (data.length) {
-          setAiLoading(true);
-          const insight = await analyzeSubmissions(data.slice(0, 20), user.role);
-          setAiInsight(insight);
-        } else {
-          setAiInsight(null);
-        }
       } catch (error) {
         console.error('Submissions fetch error', error);
-        setAiInsight(null);
       } finally {
         setSubmissionsLoading(false);
-        setAiLoading(false);
       }
     };
     loadSubmissions();
@@ -2513,6 +2506,7 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
             : undefined
         }
         readOnly={user.role !== UserRole.DIRECTOR}
+        viewer={{ id: user.id, role: user.role }}
       />
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
@@ -2576,68 +2570,6 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
         </div>
 
         <div className="space-y-6">
-          <div className="bg-indigo-900 text-white p-6 rounded-3xl shadow-2xl shadow-indigo-900/40 border border-indigo-700 relative overflow-hidden">
-             <div className="absolute top-0 right-0 p-3 opacity-10">
-               <i className="fas fa-brain text-7xl"></i>
-             </div>
-             <div className="flex items-center gap-3 mb-6 relative">
-                <div className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center backdrop-blur-md border border-white/20">
-                  <i className="fas fa-robot text-indigo-300"></i>
-                </div>
-                <h3 className="text-xl font-black tracking-tight uppercase">SÍNTESE IA</h3>
-             </div>
-             
-             {aiLoading ? (
-               <div className="space-y-4 animate-pulse">
-                 <div className="h-4 bg-white/10 rounded w-3/4"></div>
-                 <div className="h-40 bg-white/10 rounded"></div>
-               </div>
-             ) : aiInsight ? (
-               <div className="space-y-6 relative">
-                 <p className="text-indigo-100/90 text-sm leading-relaxed font-medium bg-indigo-950/50 p-4 rounded-2xl border border-white/5">
-                   "{aiInsight.summary}"
-                 </p>
-                 <div className="flex flex-wrap gap-2">
-                   {aiInsight.topThemes?.map((t: string) => (
-                     <span key={t} className="px-3 py-1.5 bg-white/5 hover:bg-white/10 transition-colors rounded-xl text-[10px] font-black border border-white/10">
-                       {t}
-                     </span>
-                   ))}
-                 </div>
-                 
-                 {user.role === UserRole.DIRECTOR && aiInsight.candidateBriefing && (
-                   <div className="pt-6 border-t border-white/10 space-y-5">
-                     <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-400">Comando do Candidato</h4>
-                     <div className="space-y-4">
-                        <div className="flex gap-4 p-3 bg-white/5 rounded-2xl border border-white/5">
-                           <div className="w-8 h-8 shrink-0 bg-red-500/20 text-red-400 rounded-lg flex items-center justify-center">
-                             <i className="fas fa-bolt text-xs"></i>
-                           </div>
-                           <div>
-                             <p className="text-[10px] font-black text-red-400 uppercase">Foco Crítico</p>
-                             <p className="text-xs text-white font-medium">{aiInsight.candidateBriefing.risks[0]}</p>
-                           </div>
-                        </div>
-                        <div className="flex gap-4 p-3 bg-white/5 rounded-2xl border border-white/5">
-                           <div className="w-8 h-8 shrink-0 bg-emerald-500/20 text-emerald-400 rounded-lg flex items-center justify-center">
-                             <i className="fas fa-bullseye text-xs"></i>
-                           </div>
-                           <div>
-                             <p className="text-[10px] font-black text-emerald-400 uppercase">Oportunidade</p>
-                             <p className="text-xs text-white font-medium">{aiInsight.candidateBriefing.opportunities[0]}</p>
-                           </div>
-                        </div>
-                     </div>
-                   </div>
-                 )}
-               </div>
-             ) : (
-               <div className="text-sm text-indigo-100/70">
-                 Ainda sem dados suficientes para gerar a síntese. Solicite relatos no campo e tente novamente.
-               </div>
-             )}
-          </div>
-          
           {user.role !== UserRole.DIRECTOR && (
             <div className="bg-amber-50 p-6 rounded-3xl border border-amber-200/50 shadow-sm relative overflow-hidden group">
                <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform">

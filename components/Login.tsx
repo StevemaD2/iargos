@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { User, UserRole } from '../types';
 import { supabase } from '../services/supabaseClient';
 import { requestCurrentLocation } from '../services/locationService';
-import { recordMemberTimesheetEvent } from '../services/memberActivityService';
+import { recordMemberTimesheetEvent, updateMemberLastLocation } from '../services/memberActivityService';
 
 interface LoginProps {
   onLogin: (user: User) => void;
@@ -310,6 +310,7 @@ const Login: React.FC<LoginProps> = ({ onLogin, initialMode = 'choice', lockMode
       const loginLocation = await locationPromise;
       try {
         await recordMemberTimesheetEvent(member.id, 'LOGIN', loginLocation);
+        await updateMemberLastLocation(member.id, loginLocation, new Date().toISOString());
       } catch (timesheetError) {
         console.warn('Falha ao registrar ponto de entrada', timesheetError);
       }
@@ -398,6 +399,7 @@ const Login: React.FC<LoginProps> = ({ onLogin, initialMode = 'choice', lockMode
       const loginLocation = await locationPromise;
       try {
         await recordMemberTimesheetEvent(member.id, 'LOGIN', loginLocation);
+        await updateMemberLastLocation(member.id, loginLocation, new Date().toISOString());
       } catch (timesheetError) {
         console.warn('Falha ao registrar ponto de entrada', timesheetError);
       }

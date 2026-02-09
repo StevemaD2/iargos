@@ -151,6 +151,7 @@ export interface User {
   operationId?: string;
   operationName?: string;
   operationState?: string;
+  memberId?: string;
 }
 
 export interface VoterRecord {

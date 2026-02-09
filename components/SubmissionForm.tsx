@@ -15,6 +15,7 @@ import {
   uploadSubmissionFiles,
   createSignedAttachmentUrl
 } from '../services/submissionsService';
+import { updateMemberLastLocation } from '../services/memberActivityService';
 
 interface SubmissionFormProps {
   user: User;
@@ -158,6 +159,12 @@ const SubmissionForm: React.FC<SubmissionFormProps> = ({ user }) => {
       if (files.length) {
         attachments = await uploadSubmissionFiles(user.operationId, user.id, files);
       }
+
+      await updateMemberLastLocation(user.id, {
+        lat: location.coords.latitude,
+        lng: location.coords.longitude,
+        accuracy: location.coords.accuracy
+      });
 
       await createSubmission({
         operationId: user.operationId,

@@ -1,6 +1,7 @@
 export interface GeoPoint {
   lat: number;
   lng: number;
+  accuracy?: number;
 }
 
 export const requestCurrentLocation = (options?: PositionOptions): Promise<GeoPoint | null> => {
@@ -14,7 +15,8 @@ export const requestCurrentLocation = (options?: PositionOptions): Promise<GeoPo
       (position) => {
         resolve({
           lat: position.coords.latitude,
-          lng: position.coords.longitude
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy
         });
       },
       () => resolve(null),

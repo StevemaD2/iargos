@@ -125,6 +125,15 @@ if (mapboxToken) {
   mapboxgl.accessToken = mapboxToken;
 }
 
+const MAP_STYLE_OPTIONS = [
+  { label: 'Padrão', value: 'mapbox://styles/mapbox/light-v11' },
+  { label: 'Escuro', value: 'mapbox://styles/mapbox/dark-v11' },
+  { label: 'Satélite', value: 'mapbox://styles/mapbox/satellite-v9' },
+  { label: 'Satélite (ruas)', value: 'mapbox://styles/mapbox/satellite-streets-v12' },
+  { label: 'Ruas', value: 'mapbox://styles/mapbox/streets-v12' },
+  { label: 'Relevo', value: 'mapbox://styles/mapbox/outdoors-v12' }
+];
+
 type ActionFormState = {
   subzona_id: string;
   data: string;
@@ -184,6 +193,10 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
   const [subzoneDeleting, setSubzoneDeleting] = useState<Record<string, boolean>>({});
   const [memberPins, setMemberPins] = useState<MemberLocationPin[]>([]);
   const memberMarkersRef = useRef<Map<string, mapboxgl.Marker>>(new Map());
+  const [mapStyle, setMapStyle] = useState(MAP_STYLE_OPTIONS[0]?.value || 'mapbox://styles/mapbox/light-v11');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showZonePanel, setShowZonePanel] = useState(false);
+  const mapStyleRef = useRef(mapStyle);
   const canEdit = !readOnly;
   const pendingZoneTarget = pendingTargetZoneId
     ? zones.find((zone) => zone.id === pendingTargetZoneId) || null
@@ -478,13 +491,22 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
   );
 
   useEffect(() => {
-    if (!mapboxToken || !operationId || mapRef.current || !mapContainerRef.current) return;
+    if (!mapboxToken || !operationId || !mapContainerRef.current) return;
+    if (mapRef.current) {
+      if (mapStyleRef.current === mapStyle) return;
+      mapRef.current.remove();
+      mapRef.current = null;
+      setMapReady(false);
+    }
+
+    mapStyleRef.current = mapStyle;
     const map = new mapboxgl.Map({
       container: mapContainerRef.current,
-      style: 'mapbox://styles/mapbox/light-v11',
+      style: mapStyle,
       center: [defaultCenter.lng, defaultCenter.lat],
       zoom: defaultCenter.zoom,
-      attributionControl: false
+      attributionControl: false,
+      logoPosition: 'bottom-right'
     });
     mapRef.current = map;
     map.addControl(new mapboxgl.NavigationControl(), 'bottom-right');
@@ -548,7 +570,7 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
       mapRef.current = null;
       setMapReady(false);
     };
-  }, [handleDrawCreate, operationId, readOnly]);
+  }, [handleDrawCreate, operationId, readOnly, mapStyle]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -556,6 +578,11 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
       map.flyTo({ center: [stateCenter.lng, stateCenter.lat], zoom: stateCenter.zoom });
     }
   }, [stateCenter, mapReady]);
+
+  useEffect(() => {
+    if (!mapRef.current) return;
+    mapRef.current.resize();
+  }, [isFullscreen]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1159,58 +1186,107 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
   }
 
   return (
-    <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="w-full h-[620px]" ref={mapContainerRef} />
-
-      <div className="p-6 space-y-4">
-        {error && <div className="p-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-100">{error}</div>}
-        {canEdit && (
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-2xl p-4">
-            <div>
-              <p className="text-sm font-bold text-indigo-900">Desenhar nova zona</p>
-              <p className="text-xs text-indigo-700">Clique em “Iniciar desenho” e marque os pontos no mapa.</p>
-            </div>
+    <div
+      className={`bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden ${
+        isFullscreen ? 'fixed inset-0 z-50 p-4' : ''
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-slate-200 bg-white">
+        <div>
+          <p className="text-xs font-bold text-slate-500 uppercase">Mapa Estratégico</p>
+          <p className="text-sm text-slate-600">
+            {stateCenter ? 'Foco no estado da operação.' : 'Visualização nacional.'}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <select
+            value={mapStyle}
+            onChange={(e) => setMapStyle(e.target.value)}
+            className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+          >
+            {MAP_STYLE_OPTIONS.map((option) => (
+              <option key={`zone-style-${option.value}`} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          {!isFullscreen && (
             <button
               type="button"
-              onClick={() => handleStartDrawing()}
-              disabled={!mapReady}
-              className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={() => setShowZonePanel((prev) => !prev)}
+              className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50"
             >
-              Iniciar desenho
+              {showZonePanel ? 'Ocultar painel' : 'Mostrar painel'}
             </button>
-          </div>
-        )}
+          )}
+          <button
+            type="button"
+            onClick={() => setIsFullscreen((prev) => !prev)}
+            className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            {isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
+          </button>
+        </div>
+      </div>
 
-        {pendingGeometry && canEdit && pendingZoneTarget && (
-          <form onSubmit={handleSaveZone} className="space-y-3 bg-slate-50 border border-slate-200 rounded-2xl p-4">
-            <div className="flex items-center justify-between">
+      <div
+        className="w-full"
+        style={{ height: isFullscreen ? 'calc(100vh - 120px)' : '620px' }}
+        ref={mapContainerRef}
+      />
+
+      {!isFullscreen && showZonePanel && (
+        <div className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 bg-red-50 text-red-600 text-sm rounded-xl border border-red-100">{error}</div>
+          )}
+          {canEdit && (
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-indigo-50 border border-indigo-100 rounded-2xl p-4">
               <div>
-                <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                  <i className="fas fa-vector-square text-indigo-500"></i> Atualizar área
-                </h4>
-                <p className="text-xs text-slate-500">Zona: {pendingZoneTarget.nome}</p>
+                <p className="text-sm font-bold text-indigo-900">Desenhar nova zona</p>
+                <p className="text-xs text-indigo-700">Clique em “Iniciar desenho” e marque os pontos no mapa.</p>
               </div>
               <button
                 type="button"
-                className="text-xs text-slate-500 hover:text-red-500"
-                onClick={handleCancelPending}
-              >
-                Cancelar
-              </button>
-            </div>
-            <p className="text-xs text-slate-600">
-              Confirme para substituir o polígono atual com o novo desenho aplicado no mapa.
-            </p>
-            <div className="flex items-center gap-3">
-              <button
-                type="submit"
+                onClick={() => handleStartDrawing()}
+                disabled={!mapReady}
                 className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Aplicar nova área
+                Iniciar desenho
               </button>
             </div>
-          </form>
-        )}
+          )}
+
+          {pendingGeometry && canEdit && pendingZoneTarget && (
+            <form onSubmit={handleSaveZone} className="space-y-3 bg-slate-50 border border-slate-200 rounded-2xl p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                    <i className="fas fa-vector-square text-indigo-500"></i> Atualizar área
+                  </h4>
+                  <p className="text-xs text-slate-500">Zona: {pendingZoneTarget.nome}</p>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-slate-500 hover:text-red-500"
+                  onClick={handleCancelPending}
+                >
+                  Cancelar
+                </button>
+              </div>
+              <p className="text-xs text-slate-600">
+                Confirme para substituir o polígono atual com o novo desenho aplicado no mapa.
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Aplicar nova área
+                </button>
+              </div>
+            </form>
+          )}
 
         {pendingGeometry && canEdit && !pendingZoneTarget && (
           <form onSubmit={handleSaveZone} className="space-y-3 bg-slate-50 border border-slate-200 rounded-2xl p-4">
@@ -1854,7 +1930,8 @@ const ZonePlanner: React.FC<ZonePlannerProps> = ({ operationId, stateCenter, rea
             </div>
           )}
         </div>
-      </div>
+        </div>
+      )}
     </div>
   );
 };

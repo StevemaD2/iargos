@@ -18,6 +18,13 @@ const App: React.FC = () => {
     return saved ? JSON.parse(saved) : null;
   });
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('iargos_sidebar_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   const handleLogin = (newUser: User) => {
     setUser(newUser);
@@ -108,6 +115,7 @@ const App: React.FC = () => {
               <Route path="/team" element={<Dashboard user={user} view="TEAM" />} />
               <Route path="/minha-equipe" element={<Dashboard user={user} view="LEADER_TEAM" />} />
               <Route path="/eleitores" element={<Dashboard user={user} view="VOTERS" />} />
+              <Route path="/mapa-calor" element={<Dashboard user={user} view="HEATMAP" />} />
               <Route path="/report" element={<SubmissionForm user={user} />} />
               <Route path="/feed" element={<LeaderFeed user={user} />} />
               <Route path="/chat" element={<ChatPage user={user} />} />
@@ -128,6 +136,18 @@ const App: React.FC = () => {
             onLogout={handleLogout}
             mobileOpen={isMobileNavOpen}
             onClose={() => setIsMobileNavOpen(false)}
+            collapsed={isSidebarCollapsed}
+            onToggleCollapse={() => {
+              setIsSidebarCollapsed((prev) => {
+                const next = !prev;
+                try {
+                  localStorage.setItem('iargos_sidebar_collapsed', next ? '1' : '0');
+                } catch {
+                  // ignore storage failures
+                }
+                return next;
+              });
+            }}
           />
         )}
         <div className="flex-1 min-h-0 flex flex-col">

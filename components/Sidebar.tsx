@@ -8,13 +8,23 @@ interface SidebarProps {
   onLogout: () => void;
   mobileOpen?: boolean;
   onClose?: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, onClose }) => {
+const Sidebar: React.FC<SidebarProps> = ({
+  user,
+  onLogout,
+  mobileOpen = false,
+  onClose,
+  collapsed = false,
+  onToggleCollapse
+}) => {
   const location = useLocation();
 
   const navItems = [
     { path: '/', label: 'Comando Central', icon: 'fa-gauge-high', roles: Object.values(UserRole) },
+    { path: '/mapa-calor', label: 'Mapa de Calor', icon: 'fa-fire-flame-curved', roles: [UserRole.DIRECTOR] },
     { path: '/feed', label: 'Monitoramento', icon: 'fa-stream', roles: [UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] },
     { path: '/minha-equipe', label: 'Minha Equipe', icon: 'fa-people-line', roles: [UserRole.L3, UserRole.L2, UserRole.L1] },
     { path: '/team', label: 'Expansão de Equipe', icon: 'fa-users', roles: [UserRole.L3, UserRole.L2, UserRole.L1, UserRole.DIRECTOR] },
@@ -47,13 +57,26 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, o
         <div className="flex items-start justify-between gap-2">
           <div>
             <h1 className="text-xl font-black tracking-tight flex items-center gap-2 text-indigo-400">
-              <i className="fas fa-shield-halved"></i> IARGOS
+              <i className="fas fa-shield-halved"></i>
+              {!collapsed && 'IARGOS'}
             </h1>
-            <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest font-bold">
-              {user.role.replace('_', ' ')}
-            </p>
+            {!collapsed && (
+              <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest font-bold">
+                {user.role.replace('_', ' ')}
+              </p>
+            )}
           </div>
-          {onClose && (
+          <div className="flex items-center gap-2">
+            {onToggleCollapse && (
+              <button
+                onClick={onToggleCollapse}
+                className="hidden md:flex w-9 h-9 rounded-lg bg-slate-800/70 items-center justify-center text-slate-200"
+                aria-label={collapsed ? 'Expandir menu' : 'Recolher menu'}
+              >
+                <i className={`fas ${collapsed ? 'fa-chevron-right' : 'fa-chevron-left'}`}></i>
+              </button>
+            )}
+            {onClose && (
             <button
               onClick={onClose}
               className="md:hidden w-9 h-9 rounded-lg bg-slate-800/70 flex items-center justify-center text-slate-200"
@@ -61,11 +84,13 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, o
             >
               <i className="fas fa-xmark"></i>
             </button>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
-      <div className="mx-4 mt-6 p-4 rounded-xl bg-indigo-600/10 border border-indigo-500/20">
+      {!collapsed && (
+        <div className="mx-4 mt-6 p-4 rounded-xl bg-indigo-600/10 border border-indigo-500/20">
         <div className="flex items-center gap-2 text-indigo-400 text-[10px] font-bold uppercase tracking-widest mb-2">
           <i className="fas fa-calendar-check"></i> Contagem Regressiva
         </div>
@@ -75,9 +100,10 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, o
         <div className="text-xs text-indigo-400/80 mt-1 font-medium">
           ({weeks} semanas para a urna)
         </div>
-      </div>
+        </div>
+      )}
 
-      <nav className="flex-1 p-4 space-y-1 mt-4">
+      <nav className={`flex-1 p-4 space-y-1 mt-4 ${collapsed ? 'px-2' : ''}`}>
         {filteredItems.map(item => (
           <Link
             key={item.path}
@@ -89,8 +115,12 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, o
                 : 'text-slate-400 hover:bg-slate-800 hover:text-white'
             }`}
           >
-            <i className={`fas ${item.icon} w-5 text-center ${location.pathname === item.path ? 'text-white' : 'group-hover:text-indigo-400'}`}></i>
-            <span className="font-semibold text-sm">{item.label}</span>
+            <i
+              className={`fas ${item.icon} w-5 text-center ${
+                location.pathname === item.path ? 'text-white' : 'group-hover:text-indigo-400'
+              }`}
+            ></i>
+            {!collapsed && <span className="font-semibold text-sm">{item.label}</span>}
           </Link>
         ))}
       </nav>
@@ -100,17 +130,19 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, o
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center font-bold text-white shadow-inner">
             {user.name.charAt(0)}
           </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold truncate">{user.name}</p>
-            <p className="text-[10px] text-slate-500 truncate">Sessão Ativa</p>
-          </div>
+          {!collapsed && (
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold truncate">{user.name}</p>
+              <p className="text-[10px] text-slate-500 truncate">Sessão Ativa</p>
+            </div>
+          )}
         </div>
         <button
           onClick={onLogout}
           className="w-full flex items-center gap-3 px-4 py-2 text-slate-400 hover:text-red-400 transition-colors text-sm font-medium"
         >
           <i className="fas fa-power-off text-xs"></i>
-          <span>Encerrar Operação</span>
+          {!collapsed && <span>Encerrar Operação</span>}
         </button>
       </div>
     </>
@@ -118,7 +150,11 @@ const Sidebar: React.FC<SidebarProps> = ({ user, onLogout, mobileOpen = false, o
 
   return (
     <>
-      <div className="w-64 bg-slate-900 text-white flex flex-col hidden md:flex shrink-0 border-r border-slate-800">
+      <div
+        className={`bg-slate-900 text-white flex flex-col hidden md:flex shrink-0 border-r border-slate-800 ${
+          collapsed ? 'w-20' : 'w-64'
+        }`}
+      >
         {sidebarBody}
       </div>
       {mobileOpen && (

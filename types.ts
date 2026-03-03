@@ -26,6 +26,12 @@ export enum VoterSentiment {
   NEGATIVO = 'NEGATIVO'
 }
 
+export enum VoterGender {
+  MASCULINO = 'MASCULINO',
+  FEMININO = 'FEMININO',
+  OUTRO = 'OUTRO'
+}
+
 export enum IntentionVoto {
   JA_TEM_CANDIDATO = 'JA_TEM_CANDIDATO',
   EM_DUVIDA = 'EM_DUVIDA',
@@ -161,6 +167,11 @@ export interface VoterRecord {
   phone: string;
   city?: string | null;
   neighborhood?: string | null;
+  gender?: VoterGender | null;
+  age?: number | null;
+  lat?: number | null;
+  lng?: number | null;
+  accuracy?: number | null;
   sentiment?: VoterSentiment | null;
   knowsCandidate?: boolean | null;
   decidedVote?: boolean | null;

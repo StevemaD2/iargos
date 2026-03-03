@@ -1,10 +1,13 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
 import {
   User,
   UserRole,
   Submission,
   VoterSentiment,
+  VoterGender,
   CampaignConfig,
   HierarchyNote,
   CampaignScheduleStatus,
@@ -14,7 +17,18 @@ import {
   GeoPoint,
   VoterRecord
 } from '../types';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell
+} from 'recharts';
 import { supabase } from '../services/supabaseClient';
 import { requestCurrentLocation } from '../services/locationService';
 import ZonePlanner from './ZonePlanner';
@@ -40,7 +54,16 @@ import {
   TimesheetData
 } from '../services/memberActivityService';
 
-type DashboardView = 'COMMAND' | 'TEAM' | 'STRUCTURE' | 'CRONOGRAMA' | 'SETTINGS' | 'FINANCE' | 'VOTERS' | 'LEADER_TEAM';
+type DashboardView =
+  | 'COMMAND'
+  | 'TEAM'
+  | 'STRUCTURE'
+  | 'CRONOGRAMA'
+  | 'SETTINGS'
+  | 'FINANCE'
+  | 'VOTERS'
+  | 'LEADER_TEAM'
+  | 'HEATMAP';
 type FinanceRoleFilter = 'ALL' | UserRole;
 
 interface DashboardProps {
@@ -128,6 +151,26 @@ const VOTER_SENTIMENT_OPTIONS = [
   { label: 'Negativo', value: VoterSentiment.NEGATIVO }
 ];
 
+const VOTER_GENDER_OPTIONS = [
+  { label: 'Masculino', value: VoterGender.MASCULINO },
+  { label: 'Feminino', value: VoterGender.FEMININO },
+  { label: 'Outro', value: VoterGender.OUTRO }
+];
+
+const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN || '';
+if (mapboxToken) {
+  mapboxgl.accessToken = mapboxToken;
+}
+
+const MAP_STYLE_OPTIONS = [
+  { label: 'Padrão', value: 'mapbox://styles/mapbox/light-v11' },
+  { label: 'Escuro', value: 'mapbox://styles/mapbox/dark-v11' },
+  { label: 'Satélite', value: 'mapbox://styles/mapbox/satellite-v9' },
+  { label: 'Satélite (ruas)', value: 'mapbox://styles/mapbox/satellite-streets-v12' },
+  { label: 'Ruas', value: 'mapbox://styles/mapbox/streets-v12' },
+  { label: 'Relevo', value: 'mapbox://styles/mapbox/outdoors-v12' }
+];
+
 const VOTER_BOOL_OPTIONS = [
   { label: 'Selecione', value: '' },
   { label: 'Sim', value: 'yes' },
@@ -139,6 +182,8 @@ type VoterFormState = {
   phone: string;
   city: string;
   neighborhood: string;
+  gender: string;
+  age: string;
   sentiment: string;
   knowsCandidate: string;
   decidedVote: string;
@@ -166,6 +211,8 @@ const createVoterFormDefaults = (): VoterFormState => ({
   phone: '',
   city: '',
   neighborhood: '',
+  gender: '',
+  age: '',
   sentiment: '',
   knowsCandidate: '',
   decidedVote: '',
@@ -432,9 +479,18 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
   const [voterFormExpanded, setVoterFormExpanded] = useState(user.role !== UserRole.DIRECTOR);
   const [voterSearch, setVoterSearch] = useState('');
   const [voterSentimentFilter, setVoterSentimentFilter] = useState('');
+  const [voterGenderFilter, setVoterGenderFilter] = useState('');
+  const [voterAgeMin, setVoterAgeMin] = useState('');
+  const [voterAgeMax, setVoterAgeMax] = useState('');
   const [voterKnowledgeFilter, setVoterKnowledgeFilter] = useState('');
   const [voterDecisionFilter, setVoterDecisionFilter] = useState('');
   const [voterSort, setVoterSort] = useState<'newest' | 'oldest' | 'name'>('newest');
+  const heatmapContainerRef = useRef<HTMLDivElement | null>(null);
+  const heatmapRef = useRef<mapboxgl.Map | null>(null);
+  const heatmapReadyRef = useRef(false);
+  const [heatmapStyle, setHeatmapStyle] = useState(MAP_STYLE_OPTIONS[0]?.value || 'mapbox://styles/mapbox/light-v11');
+  const [heatmapFullscreen, setHeatmapFullscreen] = useState(false);
+  const [expandedChart, setExpandedChart] = useState<string | null>(null);
 
   const candidatePreview = useMemo(
     () => {
@@ -760,6 +816,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     loadVoters();
   }, [loadVoters]);
 
+  const selectedState = STATE_METADATA[campaignConfig.state];
+
   const filteredVoters = useMemo(() => {
     let list = [...voters];
     const searchTerm = voterSearch.trim().toLowerCase();
@@ -770,6 +828,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
           record.phone,
           record.city,
           record.neighborhood,
+          record.gender,
+          typeof record.age === 'number' ? String(record.age) : '',
           record.wishes,
           record.electoralZone
         ]
@@ -781,6 +841,17 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     }
     if (voterSentimentFilter) {
       list = list.filter((record) => record.sentiment === voterSentimentFilter);
+    }
+    if (voterGenderFilter) {
+      list = list.filter((record) => record.gender === voterGenderFilter);
+    }
+    const minAge = Number(voterAgeMin);
+    const maxAge = Number(voterAgeMax);
+    if (!Number.isNaN(minAge) && voterAgeMin.trim() !== '') {
+      list = list.filter((record) => (record.age ?? -1) >= minAge);
+    }
+    if (!Number.isNaN(maxAge) && voterAgeMax.trim() !== '') {
+      list = list.filter((record) => (record.age ?? 9999) <= maxAge);
     }
     const matchBoolFilter = (value: boolean | null | undefined, filterValue: string) => {
       if (!filterValue) return true;
@@ -808,10 +879,170 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
     voters,
     voterSearch,
     voterSentimentFilter,
+    voterGenderFilter,
+    voterAgeMin,
+    voterAgeMax,
     voterKnowledgeFilter,
     voterDecisionFilter,
     voterSort
   ]);
+
+  const filteredVotersWithGeo = useMemo(
+    () =>
+      filteredVoters.filter(
+        (record) =>
+          typeof record.lat === 'number' &&
+          Number.isFinite(record.lat) &&
+          typeof record.lng === 'number' &&
+          Number.isFinite(record.lng)
+      ),
+    [filteredVoters]
+  );
+
+  const heatmapGeoJson = useMemo(
+    () => ({
+      type: 'FeatureCollection' as const,
+      features: filteredVotersWithGeo.map((record) => ({
+        type: 'Feature' as const,
+        properties: {
+          sentiment: record.sentiment || 'NEUTRO',
+          gender: record.gender || 'UNKNOWN',
+          age: typeof record.age === 'number' ? record.age : null
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [record.lng as number, record.lat as number]
+        }
+      }))
+    }),
+    [filteredVotersWithGeo]
+  );
+
+  const ensureHeatmapLayers = useCallback((map: mapboxgl.Map, data: any) => {
+    if (!map.getSource('voters-heatmap')) {
+      map.addSource('voters-heatmap', {
+        type: 'geojson',
+        data
+      });
+    }
+
+    const addHeatLayer = (id: string, color: string, sentiment: VoterSentiment) => {
+      if (map.getLayer(id)) return;
+      map.addLayer({
+        id,
+        type: 'heatmap',
+        source: 'voters-heatmap',
+        filter: ['==', ['get', 'sentiment'], sentiment],
+        paint: {
+          'heatmap-weight': 1,
+          'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 0, 0.6, 9, 1.2, 13, 2.4],
+          'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 8, 9, 18, 13, 30],
+          'heatmap-opacity': ['interpolate', ['linear'], ['zoom'], 0, 0.75, 13, 0.9],
+          'heatmap-color': [
+            'interpolate',
+            ['linear'],
+            ['heatmap-density'],
+            0,
+            'rgba(0,0,0,0)',
+            0.3,
+            `rgba(${color},0.35)`,
+            0.6,
+            `rgba(${color},0.6)`,
+            1,
+            `rgba(${color},0.95)`
+          ]
+        }
+      });
+    };
+
+    addHeatLayer('heatmap-positive', '34,197,94', VoterSentiment.POSITIVO);
+    addHeatLayer('heatmap-neutral', '234,179,8', VoterSentiment.NEUTRO);
+    addHeatLayer('heatmap-negative', '239,68,68', VoterSentiment.NEGATIVO);
+  }, []);
+
+  useEffect(() => {
+    if (view !== 'HEATMAP' || user.role !== UserRole.DIRECTOR) return;
+    if (!mapboxToken || !heatmapContainerRef.current || heatmapRef.current) return;
+
+    const fallbackCenter: [number, number] = selectedState
+      ? [selectedState.coords[1], selectedState.coords[0]]
+      : [-47.8825, -15.7942];
+    const fallbackZoom = selectedState?.zoom ?? 4.2;
+
+    const map = new mapboxgl.Map({
+      container: heatmapContainerRef.current,
+      style: heatmapStyle,
+      center: fallbackCenter,
+      zoom: fallbackZoom,
+      attributionControl: false,
+      logoPosition: 'bottom-right'
+    });
+    map.addControl(new mapboxgl.NavigationControl(), 'bottom-right');
+    map.addControl(
+      new mapboxgl.AttributionControl({
+        compact: true,
+        customAttribution: 'iArgos • Dados © Mapbox & OpenStreetMap'
+      }),
+      'bottom-left'
+    );
+
+    map.on('load', () => {
+      ensureHeatmapLayers(map, heatmapGeoJson);
+      heatmapReadyRef.current = true;
+    });
+
+    heatmapRef.current = map;
+
+    return () => {
+      heatmapReadyRef.current = false;
+      map.remove();
+      heatmapRef.current = null;
+    };
+  }, [view, user.role, heatmapGeoJson, heatmapStyle, selectedState, ensureHeatmapLayers]);
+
+  useEffect(() => {
+    if (view !== 'HEATMAP' || user.role !== UserRole.DIRECTOR) return;
+    const map = heatmapRef.current;
+    if (!map) return;
+    heatmapReadyRef.current = false;
+    map.setStyle(heatmapStyle);
+    map.once('style.load', () => {
+      ensureHeatmapLayers(map, heatmapGeoJson);
+      heatmapReadyRef.current = true;
+    });
+  }, [heatmapStyle, view, user.role, heatmapGeoJson, ensureHeatmapLayers]);
+
+  useEffect(() => {
+    if (view !== 'HEATMAP' || user.role !== UserRole.DIRECTOR) return;
+    if (!heatmapRef.current) return;
+    heatmapRef.current.resize();
+  }, [heatmapFullscreen, view, user.role]);
+
+  useEffect(() => {
+    if (view !== 'HEATMAP' || user.role !== UserRole.DIRECTOR) return;
+    if (!heatmapRef.current || !heatmapReadyRef.current) return;
+    const map = heatmapRef.current;
+    const source = map.getSource('voters-heatmap') as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(heatmapGeoJson as any);
+
+    if (filteredVotersWithGeo.length) {
+      const bounds = new mapboxgl.LngLatBounds();
+      filteredVotersWithGeo.forEach((record) => {
+        if (typeof record.lng === 'number' && typeof record.lat === 'number') {
+          bounds.extend([record.lng, record.lat]);
+        }
+      });
+      if (!bounds.isEmpty()) {
+        map.fitBounds(bounds, { padding: 60, maxZoom: 12 });
+      }
+    } else if (selectedState) {
+      map.easeTo({
+        center: [selectedState.coords[1], selectedState.coords[0]],
+        zoom: selectedState.zoom
+      });
+    }
+  }, [view, user.role, heatmapGeoJson, filteredVotersWithGeo, selectedState]);
 
   const myTeamMemberIds = useMemo(() => {
     if (!isLeaderRole) return new Set<string>();
@@ -851,6 +1082,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       'Telefone',
       'Cidade',
       'Bairro',
+      'Gênero',
+      'Idade',
       'Sentimento',
       'Conhece candidato',
       'Voto definido',
@@ -864,6 +1097,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, view = 'COMMAND' }) => {
       csvEscape(record.phone),
       csvEscape(record.city || ''),
       csvEscape(record.neighborhood || ''),
+      csvEscape(VOTER_GENDER_OPTIONS.find((option) => option.value === record.gender)?.label || ''),
+      csvEscape(typeof record.age === 'number' ? String(record.age) : ''),
       csvEscape(
         VOTER_SENTIMENT_OPTIONS.find((option) => option.value === record.sentiment)?.label || ''
       ),
@@ -931,30 +1166,42 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
       setVoterFormError('Configure uma operação antes de registrar eleitores.');
       return;
     }
-  const trimmedName = voterForm.name.trim();
-  const trimmedPhone = voterForm.phone.trim();
-  if (!trimmedName || !trimmedPhone) {
-    setVoterFormError('Informe nome e telefone do eleitor.');
-    return;
-  }
+    const trimmedName = voterForm.name.trim();
+    const trimmedPhone = voterForm.phone.trim();
+    if (!trimmedName || !trimmedPhone) {
+      setVoterFormError('Informe nome e telefone do eleitor.');
+      return;
+    }
+    if (voterForm.age.trim()) {
+      const parsedAge = Number(voterForm.age);
+      if (Number.isNaN(parsedAge) || parsedAge < 0 || parsedAge > 120) {
+        setVoterFormError('Informe uma idade válida (0 a 120).');
+        return;
+      }
+    }
 
-  setVoterSaving(true);
-  setVoterFormError(null);
-  setVoterSuccess(null);
-  try {
-    const locationSnapshot = user.role === UserRole.DIRECTOR ? null : await requestCurrentLocation().catch(() => null);
-    const payload = {
-      name: trimmedName,
-      phone: trimmedPhone,
-      city: voterForm.city.trim() || undefined,
-      neighborhood: voterForm.neighborhood.trim() || undefined,
-      sentiment: (voterForm.sentiment as VoterSentiment) || null,
-      knowsCandidate: parseBooleanSelect(voterForm.knowsCandidate),
-      decidedVote: parseBooleanSelect(voterForm.decidedVote),
-      wishes: voterForm.wishes.trim() || undefined,
-      electoralZone: voterForm.electoralZone.trim() || undefined,
-      recordedByName: user.name
-    };
+    setVoterSaving(true);
+    setVoterFormError(null);
+    setVoterSuccess(null);
+    try {
+      const locationSnapshot = await requestCurrentLocation().catch(() => null);
+      const payload = {
+        name: trimmedName,
+        phone: trimmedPhone,
+        city: voterForm.city.trim() || undefined,
+        neighborhood: voterForm.neighborhood.trim() || undefined,
+        gender: (voterForm.gender as VoterGender) || null,
+        age: voterForm.age.trim() ? Number(voterForm.age) : null,
+        lat: locationSnapshot?.lat ?? null,
+        lng: locationSnapshot?.lng ?? null,
+        accuracy: locationSnapshot?.accuracy ?? null,
+        sentiment: (voterForm.sentiment as VoterSentiment) || null,
+        knowsCandidate: parseBooleanSelect(voterForm.knowsCandidate),
+        decidedVote: parseBooleanSelect(voterForm.decidedVote),
+        wishes: voterForm.wishes.trim() || undefined,
+        electoralZone: voterForm.electoralZone.trim() || undefined,
+        recordedByName: user.name
+      };
       const recordedById = user.role === UserRole.DIRECTOR ? undefined : user.id;
       const record = await createOperationVoter(operation.id, payload, recordedById);
       if (recordedById && locationSnapshot) {
@@ -963,14 +1210,14 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
       setVoterSuccess('Eleitor registrado com sucesso.');
       setVoterForm(createVoterFormDefaults());
       setVoters((prev) => ((user.role === UserRole.DIRECTOR || isLeaderRole) ? [record, ...prev] : prev));
-  } catch (error) {
-    console.error('Voter save error', error);
-    setVoterFormError('Não foi possível salvar o eleitor agora.');
-  } finally {
-    setVoterSaving(false);
-    setTimeout(() => setVoterSuccess(null), 3500);
-  }
-};
+    } catch (error) {
+      console.error('Voter save error', error);
+      setVoterFormError('Não foi possível salvar o eleitor agora.');
+    } finally {
+      setVoterSaving(false);
+      setTimeout(() => setVoterSuccess(null), 3500);
+    }
+  };
 
   const handleOperationSave = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -1825,6 +2072,122 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
       .slice(0, 5);
   }, [submissions]);
 
+  const voterGenderChartData = useMemo(() => {
+    const base = [
+      { name: 'Masculino', key: VoterGender.MASCULINO, value: 0 },
+      { name: 'Feminino', key: VoterGender.FEMININO, value: 0 },
+      { name: 'Outro', key: VoterGender.OUTRO, value: 0 },
+      { name: 'Não informado', key: 'UNKNOWN', value: 0 }
+    ];
+    voters.forEach((record) => {
+      const gender = record.gender || 'UNKNOWN';
+      const entry = base.find((item) => item.key === gender);
+      if (entry) entry.value += 1;
+    });
+    return base;
+  }, [voters]);
+
+  const voterSentimentChartData = useMemo(() => {
+    const base = [
+      { name: 'Positivo', key: VoterSentiment.POSITIVO, value: 0 },
+      { name: 'Neutro', key: VoterSentiment.NEUTRO, value: 0 },
+      { name: 'Negativo', key: VoterSentiment.NEGATIVO, value: 0 },
+      { name: 'Não informado', key: 'UNKNOWN', value: 0 }
+    ];
+    voters.forEach((record) => {
+      const sentiment = record.sentiment || 'UNKNOWN';
+      const entry = base.find((item) => item.key === sentiment);
+      if (entry) entry.value += 1;
+    });
+    return base;
+  }, [voters]);
+
+  const voterAgeChartData = useMemo(() => {
+    const buckets = [
+      { name: '<16', min: 0, max: 15, value: 0 },
+      { name: '16-24', min: 16, max: 24, value: 0 },
+      { name: '25-34', min: 25, max: 34, value: 0 },
+      { name: '35-44', min: 35, max: 44, value: 0 },
+      { name: '45-59', min: 45, max: 59, value: 0 },
+      { name: '60+', min: 60, max: 150, value: 0 },
+      { name: 'Não informado', min: null, max: null, value: 0 }
+    ];
+    voters.forEach((record) => {
+      if (typeof record.age !== 'number' || Number.isNaN(record.age)) {
+        buckets.find((b) => b.name === 'Não informado')!.value += 1;
+        return;
+      }
+      const bucket = buckets.find((b) => b.min != null && record.age >= b.min && record.age <= (b.max as number));
+      if (bucket) bucket.value += 1;
+    });
+    return buckets;
+  }, [voters]);
+
+  const voterKnowledgeChartData = useMemo(() => {
+    const data = [
+      { name: 'Sim', value: 0 },
+      { name: 'Não', value: 0 },
+      { name: 'Não informado', value: 0 }
+    ];
+    voters.forEach((record) => {
+      if (record.knowsCandidate === true) data[0].value += 1;
+      else if (record.knowsCandidate === false) data[1].value += 1;
+      else data[2].value += 1;
+    });
+    return data;
+  }, [voters]);
+
+  const voterDecisionChartData = useMemo(() => {
+    const data = [
+      { name: 'Sim', value: 0 },
+      { name: 'Não', value: 0 },
+      { name: 'Não informado', value: 0 }
+    ];
+    voters.forEach((record) => {
+      if (record.decidedVote === true) data[0].value += 1;
+      else if (record.decidedVote === false) data[1].value += 1;
+      else data[2].value += 1;
+    });
+    return data;
+  }, [voters]);
+
+  const voterCityChartData = useMemo(() => {
+    const counter: Record<string, number> = {};
+    voters.forEach((record) => {
+      const city = record.city?.trim();
+      if (city) counter[city] = (counter[city] || 0) + 1;
+    });
+    return Object.entries(counter)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6);
+  }, [voters]);
+
+  const voterNeighborhoodChartData = useMemo(() => {
+    const counter: Record<string, number> = {};
+    voters.forEach((record) => {
+      const neighborhood = record.neighborhood?.trim();
+      if (neighborhood) counter[neighborhood] = (counter[neighborhood] || 0) + 1;
+    });
+    return Object.entries(counter)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 6);
+  }, [voters]);
+
+  const voterDailyChartData = useMemo(() => {
+    const byDay: Record<string, number> = {};
+    voters.forEach((record) => {
+      const day = record.createdAt?.slice(0, 10);
+      if (!day) return;
+      byDay[day] = (byDay[day] || 0) + 1;
+    });
+    return Object.entries(byDay)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(-7);
+  }, [voters]);
+
   const totalSubmissions = submissions.length;
   const COLORS = ['#10b981', '#6366f1', '#ef4444'];
 
@@ -2089,6 +2452,202 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
       )}
     </div>
   );
+
+  const renderChartCard = (options: {
+    id: string;
+    title: string;
+    subtitle?: string;
+    content: React.ReactNode;
+  }) => (
+    <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h4 className="font-bold text-slate-800 flex items-center gap-2">{options.title}</h4>
+          {options.subtitle && <p className="text-[11px] text-slate-500">{options.subtitle}</p>}
+        </div>
+        <button
+          type="button"
+          onClick={() => setExpandedChart(options.id)}
+          className="text-xs font-semibold text-indigo-600 hover:text-indigo-800"
+        >
+          Expandir
+        </button>
+      </div>
+      <div className="h-64">{options.content}</div>
+    </div>
+  );
+
+  const renderExpandedChartModal = () => {
+    if (!expandedChart) return null;
+    const close = () => setExpandedChart(null);
+
+    const renderScrollableBarChart = (data: Array<{ name: string; value: number }>, color: string) => {
+      const minWidth = Math.max(600, data.length * 80);
+      return (
+        <div className="overflow-x-auto">
+          <div style={{ minWidth }}>
+            <ResponsiveContainer width="100%" height={400}>
+              <BarChart data={data}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="name" />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="value" fill={color} radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      );
+    };
+
+    const legendFor = (items: Array<{ label: string; value: number; color?: string }>) => (
+      <div className="space-y-2 text-sm text-slate-600">
+        {items.map((item) => (
+          <div key={item.label} className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span
+                className="w-2.5 h-2.5 rounded-full"
+                style={{ backgroundColor: item.color || '#94a3b8' }}
+              ></span>
+              <span className="font-medium">{item.label}</span>
+            </div>
+            <span className="font-semibold text-slate-700">{item.value}</span>
+          </div>
+        ))}
+      </div>
+    );
+
+    const chartMap: Record<string, { title: string; content: React.ReactNode; legend?: React.ReactNode }> = {
+      sentimentRegional: {
+        title: 'Sentimento Regional',
+        content: (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={sentimentChartData} cx="50%" cy="50%" innerRadius={90} outerRadius={130} paddingAngle={10} dataKey="value">
+                {sentimentChartData.map((entry, index) => (
+                  <Cell key={`modal-sent-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                ))}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
+        ),
+        legend: legendFor(
+          sentimentChartData.map((item, index) => ({
+            label: item.name,
+            value: item.value,
+            color: COLORS[index % COLORS.length]
+          }))
+        )
+      },
+      sentimentVoters: {
+        title: 'Sentimento dos Eleitores',
+        content: (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={voterSentimentChartData} cx="50%" cy="50%" innerRadius={90} outerRadius={130} paddingAngle={8} dataKey="value">
+                {voterSentimentChartData.map((entry, index) => (
+                  <Cell key={`modal-voter-sent-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                ))}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
+        ),
+        legend: legendFor(
+          voterSentimentChartData.map((item, index) => ({
+            label: item.name,
+            value: item.value,
+            color: COLORS[index % COLORS.length]
+          }))
+        )
+      },
+      gender: {
+        title: 'Gênero dos Eleitores',
+        content: (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={voterGenderChartData} cx="50%" cy="50%" innerRadius={90} outerRadius={130} paddingAngle={8} dataKey="value">
+                {voterGenderChartData.map((entry, index) => (
+                  <Cell key={`modal-gender-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                ))}
+              </Pie>
+              <Tooltip />
+            </PieChart>
+          </ResponsiveContainer>
+        ),
+        legend: legendFor(
+          voterGenderChartData.map((item, index) => ({
+            label: item.name,
+            value: item.value,
+            color: COLORS[index % COLORS.length]
+          }))
+        )
+      },
+      age: {
+        title: 'Idade dos Eleitores',
+        content: renderScrollableBarChart(voterAgeChartData, '#6366f1'),
+        legend: legendFor(voterAgeChartData.map((item) => ({ label: item.name, value: item.value })))
+      },
+      cities: {
+        title: 'Eleitores por Cidade',
+        content: renderScrollableBarChart(voterCityChartData, '#22c55e'),
+        legend: legendFor(voterCityChartData.map((item) => ({ label: item.name, value: item.value })))
+      },
+      neighborhoods: {
+        title: 'Eleitores por Bairro',
+        content: renderScrollableBarChart(voterNeighborhoodChartData, '#f97316'),
+        legend: legendFor(voterNeighborhoodChartData.map((item) => ({ label: item.name, value: item.value })))
+      },
+      neighborhoodSubmissions: {
+        title: 'Registros por Bairro',
+        content: renderScrollableBarChart(topNeighborhoodData, '#6366f1'),
+        legend: legendFor(topNeighborhoodData.map((item) => ({ label: item.name, value: item.value })))
+      },
+      knowledge: {
+        title: 'Conhece o Candidato',
+        content: renderScrollableBarChart(voterKnowledgeChartData, '#3b82f6'),
+        legend: legendFor(voterKnowledgeChartData.map((item) => ({ label: item.name, value: item.value })))
+      },
+      decision: {
+        title: 'Voto Definido',
+        content: renderScrollableBarChart(voterDecisionChartData, '#ef4444'),
+        legend: legendFor(voterDecisionChartData.map((item) => ({ label: item.name, value: item.value })))
+      },
+      daily: {
+        title: 'Eleitores por Dia (últimos 7)',
+        content: renderScrollableBarChart(voterDailyChartData, '#14b8a6'),
+        legend: legendFor(voterDailyChartData.map((item) => ({ label: item.name, value: item.value })))
+      }
+    };
+
+    const chart = chartMap[expandedChart];
+    if (!chart) return null;
+
+    return (
+      <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6">
+        <div className="bg-white w-full max-w-5xl rounded-3xl shadow-xl border border-slate-200 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-black text-slate-900">{chart.title}</h3>
+            <button
+              type="button"
+              onClick={close}
+              className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              Fechar
+            </button>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr,260px] gap-6 items-start">
+            <div className="h-[420px]">{chart.content}</div>
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+              <p className="text-xs font-bold text-slate-500 uppercase mb-3">Legenda</p>
+              {chart.legend || <p className="text-sm text-slate-500">Sem dados para legenda.</p>}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const renderDirectorLeaderInvitesCard = () => {
     if (!operation) return null;
@@ -2383,7 +2942,6 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
     </div>
   );
 
-  const selectedState = STATE_METADATA[campaignConfig.state];
   const leaderProfiles = useMemo(() => {
     const map = new Map<string, MemberProfile>();
     members.forEach((member) => {
@@ -2509,80 +3067,199 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
         viewer={{ id: user.id, role: user.role }}
       />
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <div className="space-y-6 xl:col-span-2">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-6">
-                <h4 className="font-bold text-slate-800 flex items-center gap-2">
-                  <i className="fas fa-heart text-indigo-500"></i> Sentimento Regional
-                </h4>
-                <span className="text-[11px] font-black text-slate-400 uppercase">
-                  {totalSubmissions} relatos
-                </span>
+      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+        <div className="xl:col-span-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+          {renderChartCard({
+            id: 'sentimentRegional',
+            title: 'Sentimento Regional',
+            subtitle: `${totalSubmissions} relatos`,
+            content: submissionsLoading ? (
+              <div className="h-full flex items-center justify-center text-slate-400 text-sm">Carregando inteligência...</div>
+            ) : sentimentChartData.every((entry) => entry.value === 0) ? (
+              <div className="h-full flex items-center justify-center text-slate-400 text-sm">
+                Nenhum dado de sentimento ainda.
               </div>
-              <div className="h-64">
-                {submissionsLoading ? (
-                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">Carregando inteligência...</div>
-                ) : sentimentChartData.every((entry) => entry.value === 0) ? (
-                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-                    Nenhum dado de sentimento ainda.
-                  </div>
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={sentimentChartData} cx="50%" cy="50%" innerRadius={70} outerRadius={95} paddingAngle={10} dataKey="value">
-                        {sentimentChartData.map((entry, index) => (
-                          <Cell key={`cell-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
-                        ))}
-                      </Pie>
-                      <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                )}
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={sentimentChartData} cx="50%" cy="50%" innerRadius={70} outerRadius={95} paddingAngle={10} dataKey="value">
+                    {sentimentChartData.map((entry, index) => (
+                      <Cell key={`cell-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' }} />
+                </PieChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'neighborhoodSubmissions',
+            title: 'Registros por Bairro',
+            content: submissionsLoading ? (
+              <div className="h-full flex items-center justify-center text-slate-400 text-sm">Carregando dados...</div>
+            ) : topNeighborhoodData.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-slate-400 text-sm">
+                Cadastre relatos com bairro para visualizar.
               </div>
-            </div>
-            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
-              <h4 className="font-bold mb-6 text-slate-800 flex items-center gap-2">
-                <i className="fas fa-chart-simple text-indigo-500"></i> Eficiência por Bairro
-              </h4>
-              <div className="h-64">
-                {submissionsLoading ? (
-                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">Carregando dados...</div>
-                ) : topNeighborhoodData.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-                    Cadastre relatos com bairro para visualizar.
-                  </div>
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={topNeighborhoodData}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 700 }} />
-                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} allowDecimals={false} />
-                      <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '15px', border: 'none' }} />
-                      <Bar dataKey="value" fill="#6366f1" radius={[10, 10, 0, 0]} barSize={45} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-            </div>
-          </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topNeighborhoodData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 700 }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} allowDecimals={false} />
+                  <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '15px', border: 'none' }} />
+                  <Bar dataKey="value" fill="#6366f1" radius={[10, 10, 0, 0]} barSize={45} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'sentimentVoters',
+            title: 'Sentimento dos Eleitores',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={voterSentimentChartData} cx="50%" cy="50%" innerRadius={70} outerRadius={95} paddingAngle={10} dataKey="value">
+                    {voterSentimentChartData.map((entry, index) => (
+                      <Cell key={`voter-sent-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'gender',
+            title: 'Gênero dos Eleitores',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={voterGenderChartData} cx="50%" cy="50%" innerRadius={70} outerRadius={95} paddingAngle={10} dataKey="value">
+                    {voterGenderChartData.map((entry, index) => (
+                      <Cell key={`voter-gender-${entry.key}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'age',
+            title: 'Idade dos Eleitores',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={voterAgeChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#6366f1" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'knowledge',
+            title: 'Conhece o Candidato',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={voterKnowledgeChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#3b82f6" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'decision',
+            title: 'Voto Definido',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={voterDecisionChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#ef4444" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'cities',
+            title: 'Eleitores por Cidade',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={voterCityChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#22c55e" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'neighborhoods',
+            title: 'Eleitores por Bairro',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={voterNeighborhoodChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#f97316" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
+
+          {renderChartCard({
+            id: 'daily',
+            title: 'Eleitores por Dia (7 dias)',
+            content: (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={voterDailyChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#14b8a6" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )
+          })}
         </div>
 
         <div className="space-y-6">
           {user.role !== UserRole.DIRECTOR && (
             <div className="bg-amber-50 p-6 rounded-3xl border border-amber-200/50 shadow-sm relative overflow-hidden group">
-               <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform">
-                 <i className="fas fa-bullhorn text-5xl"></i>
-               </div>
-               <h4 className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-3">DIRETRIZ DE CAMPO</h4>
-               <p className="text-sm font-bold text-amber-900 leading-relaxed italic relative z-10">
-                 "Concentrem esforços em ouvir o eleitor que ainda não decidiu. Cada dúvida é uma oportunidade de voto."
-               </p>
-               <div className="mt-4 flex items-center gap-2">
-                 <div className="w-2 h-2 bg-amber-400 rounded-full"></div>
-                 <span className="text-[9px] font-black text-amber-600 uppercase">Assinado: Comando Central</span>
-               </div>
+              <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:scale-110 transition-transform">
+                <i className="fas fa-bullhorn text-5xl"></i>
+              </div>
+              <h4 className="text-[10px] font-black text-amber-600 uppercase tracking-widest mb-3">DIRETRIZ DE CAMPO</h4>
+              <p className="text-sm font-bold text-amber-900 leading-relaxed italic relative z-10">
+                "Concentrem esforços em ouvir o eleitor que ainda não decidiu. Cada dúvida é uma oportunidade de voto."
+              </p>
+              <div className="mt-4 flex items-center gap-2">
+                <div className="w-2 h-2 bg-amber-400 rounded-full"></div>
+                <span className="text-[9px] font-black text-amber-600 uppercase">Assinado: Comando Central</span>
+              </div>
             </div>
           )}
         </div>
@@ -3391,6 +4068,37 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
             />
           </div>
         </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Gênero</label>
+            <select
+              value={voterForm.gender}
+              onChange={(e) => handleVoterFormChange('gender', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              disabled={!canSubmit || voterSaving}
+            >
+              <option value="">Selecione o gênero</option>
+              {VOTER_GENDER_OPTIONS.map((option) => (
+                <option key={`gender-${option.value}`} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-bold text-slate-500 uppercase">Idade</label>
+            <input
+              type="number"
+              min={0}
+              max={120}
+              value={voterForm.age}
+              onChange={(e) => handleVoterFormChange('age', e.target.value)}
+              className="mt-2 w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500"
+              placeholder="Ex: 34"
+              disabled={!canSubmit || voterSaving}
+            />
+          </div>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
             <label className="text-xs font-bold text-slate-500 uppercase">Sentimento</label>
@@ -3563,6 +4271,45 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
                   </select>
                 </div>
                 <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Gênero</label>
+                  <select
+                    value={voterGenderFilter}
+                    onChange={(e) => setVoterGenderFilter(e.target.value)}
+                    className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">Todos</option>
+                    {VOTER_GENDER_OPTIONS.map((option) => (
+                      <option key={`gender-filter-${option.value}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Idade (min)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={120}
+                    value={voterAgeMin}
+                    onChange={(e) => setVoterAgeMin(e.target.value)}
+                    className="mt-1 w-24 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                    placeholder="0"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase">Idade (max)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={120}
+                    value={voterAgeMax}
+                    onChange={(e) => setVoterAgeMax(e.target.value)}
+                    className="mt-1 w-24 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                    placeholder="120"
+                  />
+                </div>
+                <div>
                   <label className="text-[11px] font-bold text-slate-500 uppercase">Conhece candidato</label>
                   <select
                     value={voterKnowledgeFilter}
@@ -3632,6 +4379,8 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
                       <th className="pb-3">Nome</th>
                       <th className="pb-3">Contato</th>
                       <th className="pb-3">Cidade / Bairro</th>
+                      <th className="pb-3">Gênero</th>
+                      <th className="pb-3">Idade</th>
                       <th className="pb-3">Sentimento</th>
                       <th className="pb-3">Conhece</th>
                       <th className="pb-3">Voto</th>
@@ -3658,6 +4407,12 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
                             <div className="text-sm font-semibold">{record.city || '—'}</div>
                             <div className="text-xs text-slate-500">{record.neighborhood || '—'}</div>
                           </td>
+                          <td className="py-3 text-slate-600">
+                            {VOTER_GENDER_OPTIONS.find((option) => option.value === record.gender)?.label || '—'}
+                          </td>
+                          <td className="py-3 text-slate-600">
+                            {typeof record.age === 'number' ? record.age : '—'}
+                          </td>
                           <td className="py-3 text-slate-600">{sentimentLabel}</td>
                           <td className="py-3 text-slate-600">{formatBooleanDisplay(record.knowsCandidate)}</td>
                           <td className="py-3 text-slate-600">{formatBooleanDisplay(record.decidedVote)}</td>
@@ -3683,6 +4438,225 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
             )}
           </div>
         )}
+      </div>
+    );
+  };
+
+  const renderHeatmapView = () => {
+    if (user.role !== UserRole.DIRECTOR) {
+      return (
+        <div className="p-6 max-w-3xl mx-auto">
+          <h2 className="text-2xl font-bold text-slate-900 mb-2">Mapa de Calor</h2>
+          <p className="text-sm text-slate-500">Seu perfil não possui acesso ao mapa de calor.</p>
+        </div>
+      );
+    }
+
+    if (!mapboxToken) {
+      return (
+        <div className="p-6 max-w-3xl mx-auto">
+          <h2 className="text-2xl font-bold text-slate-900 mb-2">Mapa de Calor</h2>
+          <p className="text-sm text-slate-500">
+            Configure o token do Mapbox (`VITE_MAPBOX_TOKEN`) para habilitar o mapa.
+          </p>
+        </div>
+      );
+    }
+
+    const totalWithGeo = filteredVotersWithGeo.length;
+    const totalWithoutGeo = filteredVoters.length - totalWithGeo;
+
+    return (
+      <div className={`space-y-6 ${heatmapFullscreen ? 'fixed inset-0 z-50 bg-white p-4' : ''}`}>
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h2 className={`${heatmapFullscreen ? 'text-xl' : 'text-3xl'} font-black text-slate-900 tracking-tight`}>
+              Mapa de Calor
+            </h2>
+            <p className="text-slate-500 font-medium">
+              Visualize pings de eleitores com filtros por sentimento, gênero e idade.
+            </p>
+          </div>
+          <div className="text-xs font-bold text-slate-500 uppercase">
+            Com geodata: {totalWithGeo} • Sem geodata: {totalWithoutGeo}
+          </div>
+        </div>
+
+        {!heatmapFullscreen && (
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+            <div className="flex flex-wrap gap-4">
+              <div className="flex-1 min-w-[200px]">
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Busca rápida</label>
+                <input
+                  type="text"
+                  value={voterSearch}
+                  onChange={(e) => setVoterSearch(e.target.value)}
+                  className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="Nome, telefone, cidade..."
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Sentimento</label>
+                <select
+                  value={voterSentimentFilter}
+                  onChange={(e) => setVoterSentimentFilter(e.target.value)}
+                  className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">Todos</option>
+                  {VOTER_SENTIMENT_OPTIONS.map((option) => (
+                    <option key={`heat-sent-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Gênero</label>
+                <select
+                  value={voterGenderFilter}
+                  onChange={(e) => setVoterGenderFilter(e.target.value)}
+                  className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">Todos</option>
+                  {VOTER_GENDER_OPTIONS.map((option) => (
+                    <option key={`heat-gender-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Idade (min)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  value={voterAgeMin}
+                  onChange={(e) => setVoterAgeMin(e.target.value)}
+                  className="mt-1 w-24 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Idade (max)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  value={voterAgeMax}
+                  onChange={(e) => setVoterAgeMax(e.target.value)}
+                  className="mt-1 w-24 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                  placeholder="120"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Visualização</label>
+                <select
+                  value={heatmapStyle}
+                  onChange={(e) => setHeatmapStyle(e.target.value)}
+                  className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                >
+                  {MAP_STYLE_OPTIONS.map((option) => (
+                    <option key={`heatmap-style-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  onClick={() => setHeatmapFullscreen(true)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Tela cheia
+                </button>
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Conhece candidato</label>
+                <select
+                  value={voterKnowledgeFilter}
+                  onChange={(e) => setVoterKnowledgeFilter(e.target.value)}
+                  className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                >
+                  {VOTER_BOOL_OPTIONS.map((option) => (
+                    <option key={`heat-known-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[11px] font-bold text-slate-500 uppercase">Voto definido</label>
+                <select
+                  value={voterDecisionFilter}
+                  onChange={(e) => setVoterDecisionFilter(e.target.value)}
+                  className="mt-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+                >
+                  {VOTER_BOOL_OPTIONS.map((option) => (
+                    <option key={`heat-vote-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex items-center gap-4 text-xs text-slate-500">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-emerald-500"></span> Positivo
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-amber-400"></span> Neutro
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full bg-red-500"></span> Negativo
+              </div>
+            </div>
+          </div>
+        )}
+
+        {heatmapFullscreen && (
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <span className="w-3 h-3 rounded-full bg-emerald-500"></span> Positivo
+              <span className="w-3 h-3 rounded-full bg-amber-400 ml-3"></span> Neutro
+              <span className="w-3 h-3 rounded-full bg-red-500 ml-3"></span> Negativo
+            </div>
+            <div className="flex items-center gap-3">
+              <select
+                value={heatmapStyle}
+                onChange={(e) => setHeatmapStyle(e.target.value)}
+                className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500"
+              >
+                {MAP_STYLE_OPTIONS.map((option) => (
+                  <option key={`heatmap-style-full-${option.value}`} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setHeatmapFullscreen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                Sair da tela cheia
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
+          <div
+            ref={heatmapContainerRef}
+            className="w-full rounded-xl overflow-hidden border border-slate-100"
+            style={{ height: heatmapFullscreen ? 'calc(100vh - 210px)' : '520px' }}
+          />
+          {filteredVotersWithGeo.length === 0 && (
+            <p className="text-sm text-slate-500 mt-3">
+              Nenhum eleitor com geolocalização para os filtros atuais.
+            </p>
+          )}
+        </div>
       </div>
     );
   };
@@ -3969,6 +4943,8 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
         return renderLeaderTeamView();
       case 'VOTERS':
         return renderVotersView();
+      case 'HEATMAP':
+        return renderHeatmapView();
       default:
         return renderCommandView();
     }
@@ -3977,6 +4953,7 @@ const handleVoterFormChange = (field: keyof VoterFormState, value: string) => {
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
       {renderContent()}
+      {renderExpandedChartModal()}
       {renderTimesheetModal()}
     </div>
   );

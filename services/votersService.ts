@@ -1,11 +1,16 @@
 import { supabase } from './supabaseClient';
-import { VoterRecord, VoterSentiment } from '../types';
+import { VoterGender, VoterRecord, VoterSentiment } from '../types';
 
 export interface CreateVoterPayload {
   name: string;
   phone: string;
   city?: string;
   neighborhood?: string;
+  gender?: VoterGender | null;
+  age?: number | null;
+  lat?: number | null;
+  lng?: number | null;
+  accuracy?: number | null;
   sentiment?: VoterSentiment | null;
   knowsCandidate?: boolean | null;
   decidedVote?: boolean | null;
@@ -23,6 +28,11 @@ const mapRowToVoter = (row: any): VoterRecord => ({
   phone: row.telefone,
   city: row.cidade,
   neighborhood: row.bairro,
+  gender: (row.genero as VoterGender | null) || null,
+  age: typeof row.idade === 'number' ? row.idade : row.idade ? Number(row.idade) : null,
+  lat: typeof row.lat === 'number' ? row.lat : row.lat ? Number(row.lat) : null,
+  lng: typeof row.lng === 'number' ? row.lng : row.lng ? Number(row.lng) : null,
+  accuracy: typeof row.acuracia === 'number' ? row.acuracia : row.acuracia ? Number(row.acuracia) : null,
   sentiment: (row.sentimento as VoterSentiment | null) || null,
   knowsCandidate: row.conhece_candidato,
   decidedVote: row.voto_definido,
@@ -38,7 +48,7 @@ export const fetchOperationVoters = async (operationId: string): Promise<VoterRe
   const { data, error } = await supabase
     .from(TABLE)
     .select(
-      'id, operacao_id, nome, telefone, cidade, bairro, sentimento, conhece_candidato, voto_definido, desejos, zona_eleitoral, registrado_por_id, registrado_por_nome, created_at'
+      'id, operacao_id, nome, telefone, cidade, bairro, genero, idade, lat, lng, acuracia, sentimento, conhece_candidato, voto_definido, desejos, zona_eleitoral, registrado_por_id, registrado_por_nome, created_at'
     )
     .eq('operacao_id', operationId)
     .order('created_at', { ascending: false });
@@ -59,6 +69,11 @@ export const createOperationVoter = async (
     telefone: payload.phone,
     cidade: payload.city || null,
     bairro: payload.neighborhood || null,
+    genero: payload.gender || null,
+    idade: typeof payload.age === 'number' ? payload.age : payload.age ? Number(payload.age) : null,
+    lat: typeof payload.lat === 'number' ? payload.lat : payload.lat ? Number(payload.lat) : null,
+    lng: typeof payload.lng === 'number' ? payload.lng : payload.lng ? Number(payload.lng) : null,
+    acuracia: typeof payload.accuracy === 'number' ? payload.accuracy : payload.accuracy ? Number(payload.accuracy) : null,
     sentimento: payload.sentiment || null,
     conhece_candidato: payload.knowsCandidate,
     voto_definido: payload.decidedVote,
@@ -72,7 +87,7 @@ export const createOperationVoter = async (
     .from(TABLE)
     .insert(body)
     .select(
-      'id, operacao_id, nome, telefone, cidade, bairro, sentimento, conhece_candidato, voto_definido, desejos, zona_eleitoral, registrado_por_id, registrado_por_nome, created_at'
+      'id, operacao_id, nome, telefone, cidade, bairro, genero, idade, lat, lng, acuracia, sentimento, conhece_candidato, voto_definido, desejos, zona_eleitoral, registrado_por_id, registrado_por_nome, created_at'
     )
     .single();
 
